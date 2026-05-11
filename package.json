@@ -56,13 +56,13 @@
     "leva": "latest",
     "lucide-react": "^0.454.0",
     "maath": "latest",
-    "next": "15.2.4",
+    "next": "16.2.6",
     "next-themes": "latest",
     "path": "latest",
     "r3f-perf": "latest",
-    "react": "^19",
+    "react": "^19.2.6",
     "react-day-picker": "9.8.0",
-    "react-dom": "^19",
+    "react-dom": "^19.2.6",
     "react-hook-form": "^7.60.0",
     "react-native": "latest",
     "react-resizable-panels": "^2.1.7",
@@ -82,12 +82,12 @@
     "@types/react-dom": "^19",
     "@types/three": "^0.180.0",
     "eslint": "^9.39.4",
-    "eslint-config-next": "^15.2.4",
+    "eslint-config-next": "^16.2.6",
     "playwright": "^1.59.1",
     "pngjs": "^7.0.0",
     "postcss": "^8.5",
     "tailwindcss": "^4.1.9",
     "tw-animate-css": "1.3.3",
-    "typescript": "^5"
+    "typescript": "^6.0.3"
   }
 }

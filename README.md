@@ -15,8 +15,8 @@ What is working now:
 - Live market snapshots from `GET /currencies/{currency_id}/market-snapshot`.
 - 30-day daily price history from `GET /currencies/{currency_id}/klines`.
 - Token sector and project context from `GET /currencies/{currency_id}`.
-- AI Composer route with Claude support through `ANTHROPIC_API_KEY`.
-- SoSoValue-only composer fallback when no Claude key is present.
+- AI Composer route with OpenAI support through `OPENAI_API_KEY`.
+- SoSoValue-only composer fallback when no OpenAI key is present or an AI call fails.
 - Weight display as live bars.
 - 30-day weighted backtest versus BTC.
 - SSI Protocol and SoDEX publishing path represented as a Wave 3-ready draft state.
@@ -29,7 +29,7 @@ IndexForge lets anyone forge a crypto theme into an investable index:
 
 1. Enter a theme and choose tokens.
 2. Fetch live SoSoValue price, turnover, sector, and kline data.
-3. Generate suggested weights with Claude when configured, or with the built-in SoSoValue signal composer.
+3. Generate suggested weights with OpenAI when configured, or with the built-in SoSoValue signal composer.
 4. Display each token weight, rationale, 30-day activity, and live market metrics.
 5. Backtest the weighted index against BTC using daily SoSoValue closes.
 6. Prepare the SSI Protocol / ValueChain / SoDEX publishing flow for Wave 2 and Wave 3.
@@ -52,7 +52,7 @@ SoSoValue is the source of truth. The app resolves token symbols to currency IDs
 
 AI layer:
 
-The route is Claude-ready. If `ANTHROPIC_API_KEY` is set, the app sends compact SoSoValue metrics to Claude and asks for JSON weights that sum to 100. If no Claude key is available, the app uses a transparent scoring model based on theme fit, 30-day momentum, flow trend, 30-day traded value, liquidity, rank, and volatility.
+The route is OpenAI-ready. If `OPENAI_API_KEY` is set, the app sends compact SoSoValue metrics to the OpenAI Responses API and asks for structured JSON weights that sum to 100. If no OpenAI key is available, the app uses a transparent scoring model based on theme fit, 30-day momentum, flow trend, 30-day traded value, liquidity, rank, and volatility.
 
 Chain layer:
 
@@ -76,8 +76,8 @@ Environment variables:
 ```bash
 SOSOVALUE_API_KEY=your_sosovalue_key
 SOSOVALUE_BASE_URL=https://openapi.sosovalue.com/openapi/v1
-ANTHROPIC_API_KEY=optional_claude_key
-ANTHROPIC_MODEL=claude-sonnet-4-20250514
+OPENAI_API_KEY=optional_openai_key
+OPENAI_MODEL=gpt-4.1-mini
 SSI_PROTOCOL_KEY=optional_wave_3_key
 ```
 
@@ -113,7 +113,7 @@ Returns:
 - AI or signal-composer weights
 - 30-day backtest points versus BTC
 - SSI/SoDEX draft publish state
-- warnings for missing symbols or missing Claude credentials
+- warnings for missing symbols or missing OpenAI credentials
 
 ## Wave Roadmap
 
@@ -123,7 +123,7 @@ May 12, 2026
 
 - Project overview and README.
 - SoSoValue price, turnover, sector, and kline data for at least 5 tokens.
-- Claude-compatible AI Composer endpoint.
+- OpenAI-compatible AI Composer endpoint.
 - Static/live index display with weight bars.
 - 30-day BTC comparison backtest.
 - Demo-ready Next.js UI using the supplied hero animation and styling.
@@ -158,4 +158,4 @@ Building a crypto index fund normally requires quants, trading infrastructure, c
 
 - SoSoValue API documentation: https://sosovalue-1.gitbook.io/sosovalue-api-doc
 - SoDEX documentation: https://sodex.com/documentation
-- Anthropic Messages API examples: https://docs.anthropic.com/en/api/messages-examples
+- OpenAI Responses API reference: https://developers.openai.com/api/reference/resources/responses/methods/create

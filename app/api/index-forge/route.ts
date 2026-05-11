@@ -26,8 +26,8 @@ const SOURCES = [
     url: "https://sodex.com/documentation",
   },
   {
-    name: "Anthropic Messages API",
-    url: "https://docs.anthropic.com/en/api/messages-examples",
+    name: "OpenAI Responses API",
+    url: "https://developers.openai.com/api/reference/resources/responses/methods/create",
   },
 ];
 
@@ -66,12 +66,17 @@ type Kline = {
   volume: number | string;
 };
 
-type ClaudeMessage = {
-  content?: Array<{ type: string; text?: string }>;
+type OpenAIResponse = {
+  output_text?: string;
+  output?: Array<{
+    type?: string;
+    content?: Array<{ type?: string; text?: string }>;
+  }>;
   model?: string;
+  error?: { message?: string };
 };
 
-type ClaudePayload = {
+type ComposerPayload = {
   summary?: string;
   weights?: Array<{
     symbol?: string;
@@ -177,8 +182,8 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
     await enrichWithSnapshots(tokens);
 
     const fallbackComposition = composeFromMarketData(theme, tokens);
-    const claude = await composeWithClaude(theme, tokens, fallbackComposition);
-    const composition = claude.composition;
+    const ai = await composeWithOpenAI(theme, tokens, fallbackComposition);
+    const composition = ai.composition;
     const backtest = buildBacktest(tokens, composition, benchmark.history);
     const ticker = buildTicker(theme);
     const indexName = `${titleCase(theme)} Index`;
@@ -191,7 +196,7 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
       tokens,
       composition,
       backtest,
-      model: claude.model,
+      model: ai.model,
       ssiDraft: {
         name: indexName,
         ticker,
@@ -203,7 +208,7 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
           : "Awaiting SSI credentials",
       },
       unresolved,
-      warnings: [...warnings, ...claude.warnings],
+      warnings: [...warnings, ...ai.warnings],
       sources: SOURCES,
     };
 
@@ -344,7 +349,7 @@ async function sosoFetch<T>(path: string): Promise<T> {
   throw new Error("SoSoValue request failed after retry.");
 }
 
-async function composeWithClaude(
+async function composeWithOpenAI(
   theme: string,
   tokens: TokenAnalysis[],
   fallback: WeightSuggestion[]
@@ -353,8 +358,8 @@ async function composeWithClaude(
   model: IndexForgeResponse["model"];
   warnings: string[];
 }> {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  const modelName = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-20250514";
+  const apiKey = process.env.OPENAI_API_KEY;
+  const modelName = process.env.OPENAI_MODEL ?? "gpt-4.1-mini";
 
   if (!apiKey) {
     return {
@@ -362,10 +367,10 @@ async function composeWithClaude(
       model: {
         provider: "IndexForge Quant",
         name: "SoSoValue signal composer",
-        usedClaude: false,
-        note: "Add ANTHROPIC_API_KEY to switch this route to Claude.",
+        usedOpenAI: false,
+        note: "Add OPENAI_API_KEY to switch this route to OpenAI.",
       },
-      warnings: ["Claude key is not configured; using the SoSoValue signal composer."],
+      warnings: ["OpenAI key is not configured; using the SoSoValue signal composer."],
     };
   }
 
@@ -400,45 +405,89 @@ async function composeWithClaude(
   };
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
+    const response = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         "content-type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
+        authorization: `Bearer ${apiKey}`,
       },
       body: JSON.stringify({
         model: modelName,
-        max_tokens: 1200,
+        max_output_tokens: 1200,
         temperature: 0.2,
-        messages: [
+        input: [
           {
             role: "user",
-            content: JSON.stringify(prompt),
+            content: [
+              {
+                type: "input_text",
+                text: JSON.stringify(prompt),
+              },
+            ],
           },
         ],
+        text: {
+          format: {
+            type: "json_schema",
+            name: "indexforge_weights",
+            strict: true,
+            schema: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                weights: {
+                  type: "array",
+                  minItems: tokens.length,
+                  maxItems: tokens.length,
+                  items: {
+                    type: "object",
+                    additionalProperties: false,
+                    properties: {
+                      symbol: {
+                        type: "string",
+                        enum: tokens.map((token) => token.symbol),
+                      },
+                      weight: {
+                        type: "number",
+                        minimum: 1,
+                        maximum: 100,
+                      },
+                      rationale: {
+                        type: "string",
+                        minLength: 12,
+                        maxLength: 180,
+                      },
+                    },
+                    required: ["symbol", "weight", "rationale"],
+                  },
+                },
+              },
+              required: ["weights"],
+            },
+          },
+        },
       }),
     });
-    const data = (await response.json()) as ClaudeMessage & { error?: { message?: string } };
+    const data = (await response.json()) as OpenAIResponse;
 
     if (!response.ok) {
-      throw new Error(data.error?.message ?? `Claude request failed with ${response.status}`);
+      throw new Error(data.error?.message ?? `OpenAI request failed with ${response.status}`);
     }
 
-    const text = data.content?.find((block) => block.type === "text")?.text ?? "";
+    const text = extractOpenAIText(data);
     const parsed = extractJson(text);
-    const composition = coerceClaudeWeights(parsed, tokens);
+    const composition = coerceAiWeights(parsed, tokens);
 
     if (!composition) {
-      throw new Error("Claude response did not include valid weights.");
+      throw new Error("OpenAI response did not include valid weights.");
     }
 
     return {
       composition,
       model: {
-        provider: "Claude",
+        provider: "OpenAI",
         name: data.model ?? modelName,
-        usedClaude: true,
+        usedOpenAI: true,
       },
       warnings: [],
     };
@@ -448,11 +497,11 @@ async function composeWithClaude(
       model: {
         provider: "IndexForge Quant",
         name: "SoSoValue signal composer",
-        usedClaude: false,
-        note: "Claude call failed, so the route used the local market-signal composer.",
+        usedOpenAI: false,
+        note: "OpenAI call failed, so the route used the local market-signal composer.",
       },
       warnings: [
-        `Claude composer unavailable: ${
+        `OpenAI composer unavailable: ${
           error instanceof Error ? error.message : "unknown error"
         }`,
       ],
@@ -543,7 +592,7 @@ function buildBacktest(
   };
 }
 
-function coerceClaudeWeights(parsed: ClaudePayload, tokens: TokenAnalysis[]) {
+function coerceAiWeights(parsed: ComposerPayload, tokens: TokenAnalysis[]) {
   if (!Array.isArray(parsed.weights)) return null;
 
   const tokenSymbols = new Set(tokens.map((token) => token.symbol));
@@ -557,7 +606,7 @@ function coerceClaudeWeights(parsed: ClaudePayload, tokens: TokenAnalysis[]) {
       bySymbol.set(symbol, {
         symbol,
         weight,
-        rationale: item.rationale ?? item.reason ?? "Weighted by Claude from live SoSoValue inputs.",
+        rationale: item.rationale ?? item.reason ?? "Weighted by OpenAI from live SoSoValue inputs.",
       });
     }
   });
@@ -575,7 +624,17 @@ function coerceClaudeWeights(parsed: ClaudePayload, tokens: TokenAnalysis[]) {
   }));
 }
 
-function extractJson(text: string): ClaudePayload {
+function extractOpenAIText(data: OpenAIResponse) {
+  if (data.output_text) return data.output_text;
+
+  return (
+    data.output
+      ?.flatMap((item) => item.content ?? [])
+      .find((part) => part.type === "output_text")?.text ?? ""
+  );
+}
+
+function extractJson(text: string): ComposerPayload {
   const first = text.indexOf("{");
   const last = text.lastIndexOf("}");
 
@@ -583,7 +642,7 @@ function extractJson(text: string): ClaudePayload {
     throw new Error("No JSON object found.");
   }
 
-  return JSON.parse(text.slice(first, last + 1)) as ClaudePayload;
+  return JSON.parse(text.slice(first, last + 1)) as ComposerPayload;
 }
 
 function normalizeHistory(klines: Kline[]): HistoryPoint[] {

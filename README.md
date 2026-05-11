@@ -61,8 +61,8 @@ Wave 1 does not submit transactions because SSI Protocol and SoDEX credentials a
 ## Local Setup
 
 ```bash
-pnpm install
-pnpm dev
+corepack pnpm install
+corepack pnpm dev
 ```
 
 Then open:
@@ -82,6 +82,13 @@ SSI_PROTOCOL_KEY=optional_wave_3_key
 ```
 
 The local `.env.local` is ignored by git. Do not commit real keys.
+
+Production preview:
+
+```bash
+corepack pnpm build
+corepack pnpm start
+```
 
 ## API Route
 

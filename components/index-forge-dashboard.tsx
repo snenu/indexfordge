@@ -244,7 +244,7 @@ export function IndexForgeDashboard() {
             <LayerRow
               icon={<Sparkles />}
               label={result?.model.provider ?? "AI Composer"}
-              value={result?.model.name ?? "Claude route with SoSoValue fallback"}
+              value={result?.model.name ?? "OpenAI route with SoSoValue fallback"}
             />
             <LayerRow
               icon={<Gem />}
@@ -385,7 +385,7 @@ function Composition({
           <h3 className="mt-1 font-sentient text-3xl">{result.indexName}</h3>
         </div>
         <div className="font-mono text-xs uppercase text-primary">
-          {result.model.usedClaude ? "Claude" : "Quant"}
+          {result.model.usedOpenAI ? "OpenAI" : "Quant"}
         </div>
       </div>
 

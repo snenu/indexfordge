@@ -77,9 +77,9 @@ export type IndexForgeResponse = {
     maxDrawdownPct: number;
   };
   model: {
-    provider: "Claude" | "IndexForge Quant";
+    provider: "OpenAI" | "IndexForge Quant";
     name: string;
-    usedClaude: boolean;
+    usedOpenAI: boolean;
     note?: string;
   };
   ssiDraft: {

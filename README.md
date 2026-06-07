@@ -4,6 +4,8 @@ Design, validate, and prepare draft on-chain thematic indexes, powered by SSI Pr
 
 IndexForge turns a market theme like `AI infrastructure`, `DeFi blue chips`, or `SoDEX tradable majors` into a live crypto index. A creator chooses 3-8 tokens, the app pulls real SoSoValue market data, the composer suggests weights, the UI backtests the basket against BTC, and the SSI/SoDEX path shows how the index can become a wrapped on-chain product that others follow.
 
+Live production app: https://indexfordge.vercel.app
+
 ## Wave 1 Status
 
 Wave 1 due date: May 12, 2026 at 20:30.
@@ -35,7 +37,7 @@ IndexForge lets anyone forge a crypto theme into an investable index:
 4. Adjust weights with manual sliders and rerun the same backtest/validation path.
 5. Display each token weight, rationale, 30-day activity, and live market metrics.
 6. Backtest the weighted index against BTC using daily SoSoValue closes and weekly rebalance logic.
-7. Publish a draft manifest into the gallery and creator profile workflow.
+7. Save a browser-local draft manifest into the gallery and creator profile workflow.
 8. Simulate the SoDEX testnet order legs against live SoDEX spot symbol metadata.
 9. Use the `SoDEX majors` preset to demo a basket that maps to live SoDEX testnet markets.
 
@@ -154,7 +156,10 @@ May 12, 2026
 
 May 18-29, 2026
 
+Wave 2 is now implemented as a working product flow, not just a static demo:
+
 - Full index designer shipped at `/designer` with theme input, live SoSoValue token universe search, token picker, and manual weight sliders.
+- Quick presets shipped for the default AI infrastructure basket, a SoDEX-tradable majors basket, and a DeFi core basket.
 - Manual slider edits are posted back to the Next API route, normalized to 100%, and rerun through the same SoSoValue backtest, validation, SSI, and SoDEX pipeline.
 - Backtesting now uses the latest shared kline window, weekly target rebalance logic, BTC comparison, drawdown, volatility, Sharpe-style ratio, win rate, rebalance count, and explicit assumptions.
 - Validation now shows a training/holdout split, holdout return versus BTC, effective names, max-weight concentration, liquidity checks, and overfit notes.
@@ -163,13 +168,54 @@ May 18-29, 2026
 - SoDEX testnet simulation resolves intended rebalance legs against live `GET /markets/symbols` metadata and marks each leg as executable or not listed before any signed submission.
 - `SoDEX majors` preset added for a cleaner execution demo against testnet-listed assets.
 - Next API backend routes now support composer, live token universe, and gallery data.
+- Production deployment shipped on Vercel at https://indexfordge.vercel.app.
+
+Wave 2 product surfaces:
+
+- `/` introduces the product and links into the working designer, gallery, and creator views.
+- `/designer` is the main workflow: choose a theme, pick tokens, compose weights, adjust sliders, inspect backtest metrics, inspect SSI references, and stage SoDEX testnet execution intent.
+- `/gallery` shows live SoSoValue Indexes plus browser-saved IndexForge draft manifests.
+- `/creators` groups browser-saved drafts by creator name and summarizes best return and average drawdown.
+- `/api/index-forge` composes a full index response from live SoSoValue data, OpenAI or the local quant fallback, backtest validation, SSI manifest data, and SoDEX intent data.
+- `/api/index-forge/universe` exposes the full SoSoValue token universe for search.
+- `/api/index-forge/gallery` loads live SoSoValue Indexes for the gallery.
+
+Wave 2 reliability and security work:
+
+- Added full token-universe search so common symbols such as `BTC`, `ETH`, `SOL`, `DOGE`, `AAVE`, and `LINK` are discoverable.
+- Added explicit token and weight validation so malformed API payloads return `400` instead of internal errors.
+- Added per-client composer rate limiting to protect API-backed routes.
+- Added short server-side composer caching for repeated requests.
+- Added in-flight SoSoValue fetch deduplication to avoid duplicate upstream calls during concurrent UI requests.
+- Deferred token-universe loading until after the initial composer load to avoid cold-start API bursts.
+- Made expensive project-info enrichment opt-in with `SOSOVALUE_ENABLE_PROJECT_INFO=true`.
+- Made optional snapshot and SSI-reference enrichments fail fast under upstream `429` responses so core index generation still returns.
+- Hardened OpenAI response handling and fallback behavior so non-JSON upstream responses do not leak raw provider text into the UI.
+- Added a reduced-motion CSS fallback that hides the WebGL canvas for users who prefer reduced motion.
+- Removed stale tracked Next.js runtime logs from the repository.
+
+Wave 2 deployment and verification:
+
+- Vercel production deployment: https://indexfordge.vercel.app
+- Latest production deployment status: Ready.
+- Local checks run before deploy: `corepack pnpm lint` and `corepack pnpm build`.
+- Vercel build completed successfully with Next.js 16.2.6.
+- Production smoke checks confirmed `/api/index-forge/universe` returns the live universe with `BTC` and `ETH`.
+- Production smoke checks confirmed `/api/index-forge` returns a 5-token default AI infrastructure index.
+- Browser smoke checks confirmed `/designer` loads, `SoDEX majors` stages `BTC, ETH, SOL, AAVE, LINK`, token search returns `BTC`, and no browser console errors were observed.
+
+Wave 2 known limits:
+
+- Browser-saved drafts are local demo records. They are not yet shared across users or devices.
+- Signed SSI submission and signed SoDEX batch order submission are intentionally gated behind future credentialed server routes.
+- SoSoValue has strict key-level rate limits, so optional enrichment is conservative by default.
+- A shared database or Vercel storage layer is the next step for a truly public creator network.
 
 ### Current Production Notes
 
 - `OPENAI_API_KEY`, `SOSOVALUE_API_KEY`, `SOSOVALUE_BASE_URL`, `OPENAI_MODEL`, and `SSI_PROTOCOL_KEY` are configured as encrypted Vercel environment variables.
 - Keep real keys only in ignored local files such as `.env.local` and in Vercel encrypted env vars.
 - Rotate any key that was pasted into chat or terminal history before the final submission.
-- The current gallery and creator profile workflow is browser-local. A shared database or Vercel storage layer is the next step for a truly public creator network.
 
 ## Verification
 

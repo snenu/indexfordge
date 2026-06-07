@@ -1,5 +1,13 @@
 # IndexForge
 
+<p align="center">
+  <img src="app/icon.svg" alt="IndexForge logo" width="96" />
+</p>
+
+<p align="center">
+  <strong>Forge live crypto market themes into validated draft indexes.</strong>
+</p>
+
 Design, validate, and prepare draft on-chain thematic indexes, powered by SSI Protocol, SoSoValue, SoSoValue Indexes, AI, and SoDEX.
 
 IndexForge turns a market theme like `AI infrastructure`, `DeFi blue chips`, or `SoDEX tradable majors` into a live crypto index. A creator chooses 3-8 tokens, the app pulls real SoSoValue market data, the composer suggests weights, the UI backtests the basket against BTC, and the SSI/SoDEX path shows how the index can become a wrapped on-chain product that others follow.
@@ -23,6 +31,60 @@ The app is built for index creators, crypto researchers, and hackathon judges wh
 9. Save a browser-local draft and view it in the gallery and creator profile pages.
 
 The important idea is that IndexForge does not pretend a draft index is already live on-chain. It shows the honest pre-production path: live data first, transparent methodology second, validation third, and signed on-chain or exchange execution only after the required credentials and checks exist.
+
+## Visual Flow
+
+```mermaid
+flowchart LR
+  A["Creator theme"] --> B["Live token picker"]
+  B --> C["SoSoValue data"]
+  C --> D["OpenAI or quant composer"]
+  D --> E["Manual slider edits"]
+  E --> F["Backtest vs BTC"]
+  F --> G["Validation report"]
+  G --> H["SSI draft manifest"]
+  H --> I["SoDEX execution intent"]
+  I --> J["Browser-saved draft"]
+
+  B -. "Full universe search" .-> C
+  D -. "Weights sum to 100%" .-> E
+  I -. "No fake trades" .-> J
+```
+
+## System Diagram
+
+```mermaid
+flowchart TB
+  User["Creator / Judge"] --> UI["Next.js App Router UI"]
+
+  UI --> Designer["/designer"]
+  UI --> Gallery["/gallery"]
+  UI --> Creators["/creators"]
+
+  Designer --> ComposerAPI["POST /api/index-forge"]
+  Designer --> UniverseAPI["GET /api/index-forge/universe"]
+  Gallery --> GalleryAPI["GET /api/index-forge/gallery"]
+  Creators --> LocalDrafts["Browser localStorage drafts"]
+  Designer --> LocalDrafts
+
+  ComposerAPI --> SoSoValue["SoSoValue OpenAPI"]
+  UniverseAPI --> SoSoValue
+  GalleryAPI --> SoSoValueIndexes["SoSoValue Index endpoints"]
+  ComposerAPI --> OpenAI["OpenAI Responses API"]
+  ComposerAPI --> Quant["IndexForge Quant fallback"]
+  ComposerAPI --> SSI["Unsigned SSI manifest"]
+  ComposerAPI --> SoDEX["SoDEX testnet symbols"]
+
+  SoSoValue --> Metrics["Prices, klines, turnover, liquidity"]
+  Metrics --> Backtest["Weekly rebalance backtest"]
+  OpenAI --> Weights["Suggested weights"]
+  Quant --> Weights
+  Weights --> Backtest
+  Backtest --> Response["IndexForge response"]
+  SSI --> Response
+  SoDEX --> Response
+  Response --> Designer
+```
 
 ## Why It Is Useful
 
@@ -48,7 +110,7 @@ Useful outcomes:
 
 ## Wave 2 Status
 
-Wave 2 delivery window: May 18-29, 2026.
+Wave 2 delivery window: 
 
 Production app: https://indexfordge.vercel.app
 
@@ -197,7 +259,7 @@ Returns:
 
 ### Wave 1: Prove the Concept
 
-May 12, 2026
+ 
 
 - Project overview and README.
 - SoSoValue price, turnover, sector, and kline data for at least 5 tokens.
@@ -208,7 +270,7 @@ May 12, 2026
 
 ### Wave 2: Working Product
 
-May 18-29, 2026
+ 
 
 Wave 2 is now implemented as a working product flow, not just a static demo:
 
@@ -290,7 +352,7 @@ Manual smoke checks:
 
 ### Wave 3: Production Ready
 
-June 4-15, 2026
+ 
 
 - SSI Protocol mainnet index deployment.
 - SoDEX copy-trade subscriptions.

@@ -6,6 +6,46 @@ IndexForge turns a market theme like `AI infrastructure`, `DeFi blue chips`, or 
 
 Live production app: https://indexfordge.vercel.app
 
+## Project Overview
+
+IndexForge is a creator tool for turning a crypto market idea into a draft investable index. Instead of manually collecting prices, choosing weights in a spreadsheet, and guessing whether a basket is executable, IndexForge connects live market data, transparent weighting, backtesting, SSI-style index metadata, and SoDEX execution checks into one workflow.
+
+The app is built for index creators, crypto researchers, and hackathon judges who want to see the full path from idea to validated product:
+
+1. Start with a theme such as `AI infrastructure`, `DeFi blue chips`, or `SoDEX tradable majors`.
+2. Select 3-8 tokens from the live SoSoValue universe.
+3. Generate weights with OpenAI or the built-in market-signal composer.
+4. Adjust those weights manually with sliders.
+5. Backtest the basket against BTC using recent SoSoValue daily closes.
+6. Inspect risk, liquidity, concentration, and holdout validation.
+7. Produce an unsigned SSI-style index manifest.
+8. Check whether the intended rebalance legs map to live SoDEX testnet markets.
+9. Save a browser-local draft and view it in the gallery and creator profile pages.
+
+The important idea is that IndexForge does not pretend a draft index is already live on-chain. It shows the honest pre-production path: live data first, transparent methodology second, validation third, and signed on-chain or exchange execution only after the required credentials and checks exist.
+
+## Why It Is Useful
+
+Creating a crypto index normally requires several disconnected pieces: market-data APIs, quant weighting logic, backtesting, index methodology docs, trading venue checks, and a publishing layer. IndexForge compresses that into one interface so a solo creator can prototype an index business quickly.
+
+Useful outcomes:
+
+- Creators can test market themes without hardcoding performance numbers.
+- Users can compare a basket against BTC before trusting the idea.
+- Judges can inspect where every metric comes from.
+- The app can show whether selected assets are tradable on SoDEX testnet before pretending execution is ready.
+- Draft manifests make the methodology portable for future SSI Protocol submission.
+- Browser-local gallery and creator profiles demonstrate the product loop without inventing fake public users or fake transactions.
+
+## What The Demo Proves
+
+- Live SoSoValue data can power token discovery, price history, market snapshots, liquidity checks, and SSI reference context.
+- AI-generated weights can be constrained to real selected tokens and normalized to 100%.
+- A deterministic quant fallback keeps the app useful even if the OpenAI call fails.
+- Manual edits are not cosmetic; they rerun through the same API, backtest, validation, SSI manifest, and SoDEX intent pipeline.
+- SoDEX execution is handled as an intent and readiness check, not as a fake trade.
+- The app is deployed on Vercel with encrypted environment variables and production API routes.
+
 ## Wave 2 Status
 
 Wave 2 delivery window: May 18-29, 2026.

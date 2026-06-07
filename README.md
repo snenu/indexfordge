@@ -6,26 +6,40 @@ IndexForge turns a market theme like `AI infrastructure`, `DeFi blue chips`, or 
 
 Live production app: https://indexfordge.vercel.app
 
-## Wave 1 Status
+## Wave 2 Status
 
-Wave 1 due date: May 12, 2026 at 20:30.
+Wave 2 delivery window: May 18-29, 2026.
+
+Production app: https://indexfordge.vercel.app
 
 What is working now:
 
 - Real SoSoValue API integration using `x-soso-api-key`.
 - Live token resolution from `GET /currencies`.
+- Full token-universe search from live SoSoValue data, including common symbols such as `BTC`, `ETH`, `SOL`, `DOGE`, `AAVE`, and `LINK`.
 - Live market snapshots from `GET /currencies/{currency_id}/market-snapshot`.
 - Up to 90 days of daily price history from `GET /currencies/{currency_id}/klines`.
 - Optional token sector and project context from `GET /currencies/{currency_id}` when `SOSOVALUE_ENABLE_PROJECT_INFO=true`.
 - AI Composer route with OpenAI support through `OPENAI_API_KEY`.
-- SoSoValue-only composer fallback when no OpenAI key is present or an AI call fails.
-- Weight display as live bars.
-- Weekly-rebalanced backtest versus BTC with risk metrics, holdout validation, and assumptions.
-- SSI manifest generation, SoSoValue Indexes comparison, and SoDEX testnet market simulation.
-- Wave 2 designer pages for manual sliders, live SSI gallery, and browser-saved creator profiles.
-- Rate-limit-aware request caching, in-flight SoSoValue fetch dedupe, full token-universe search, and safer API validation.
+- SoSoValue-only quant composer fallback when no OpenAI key is present or an AI call fails.
+- Full designer page at `/designer` with theme input, token picker, quick presets, and manual weight sliders.
+- `SoDEX majors` preset for a cleaner execution demo using testnet-listed assets.
+- Manual slider edits posted back to the API, normalized to 100%, and rerun through the same backtest and validation path.
+- Weight display as live bars with rationale and transparent signal scores.
+- Weekly-rebalanced backtest versus BTC with return, drawdown, volatility, Sharpe-style ratio, win rate, rebalance count, and assumptions.
+- Holdout validation with training days, holdout days, effective names, max-weight concentration, and liquidity checks.
+- SSI manifest generation with methodology, ticker, data window, and constituent weights.
+- Rate-limit-safe SoSoValue Indexes comparison for live SSI reference context.
+- SoDEX testnet market simulation using live `GET /markets/symbols` metadata.
+- Gallery page at `/gallery` combining live SoSoValue Indexes with browser-saved IndexForge draft manifests.
+- Creator profiles at `/creators`, grouped from browser-saved local drafts without fake creators or fake performance.
+- Rate-limit-aware request caching, in-flight SoSoValue fetch dedupe, composer rate limiting, and safer API validation.
+- Optional snapshot and SSI-reference enrichments fail fast under upstream `429` responses so core index generation still returns.
+- Vercel production deployment with encrypted environment variables for SoSoValue, OpenAI, and SSI-related config.
 
-No price, volume, market cap, flow, return, or backtest number is hardcoded. The default token symbols are only a starting selection; the designer can load the broader SoSoValue universe at runtime.
+No price, volume, market cap, flow, return, weight, or backtest number is hardcoded. The default token symbols and quick presets are only starting selections; the designer can load the broader SoSoValue universe at runtime.
+
+Current Wave 2 boundary: browser-saved drafts are local demo records, not shared backend records yet. Signed SSI submission and signed SoDEX batch order submission remain intentionally gated behind future credentialed server routes.
 
 ## What It Does
 

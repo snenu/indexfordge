@@ -555,75 +555,7 @@ async function composeWithOpenAI(
   };
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify({
-        model: modelName,
-        max_output_tokens: 1200,
-        temperature: 0.2,
-        input: [
-          {
-            role: "user",
-            content: [
-              {
-                type: "input_text",
-                text: JSON.stringify(prompt),
-              },
-            ],
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "indexforge_weights",
-            strict: true,
-            schema: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                weights: {
-                  type: "array",
-                  minItems: tokens.length,
-                  maxItems: tokens.length,
-                  items: {
-                    type: "object",
-                    additionalProperties: false,
-                    properties: {
-                      symbol: {
-                        type: "string",
-                        enum: tokens.map((token) => token.symbol),
-                      },
-                      weight: {
-                        type: "number",
-                        minimum: 1,
-                        maximum: 100,
-                      },
-                      rationale: {
-                        type: "string",
-                        minLength: 12,
-                        maxLength: 180,
-                      },
-                    },
-                    required: ["symbol", "weight", "rationale"],
-                  },
-                },
-              },
-              required: ["weights"],
-            },
-          },
-        },
-      }),
-    });
-    const data = (await response.json()) as OpenAIResponse;
-
-    if (!response.ok) {
-      throw new Error(data.error?.message ?? `OpenAI request failed with ${response.status}`);
-    }
-
+    const data = await createOpenAIWeights(apiKey, modelName, prompt, tokens);
     const text = extractOpenAIText(data);
     const parsed = extractJson(text);
     const composition = coerceAiWeights(parsed, tokens, fallback);
@@ -658,6 +590,115 @@ async function composeWithOpenAI(
         }`,
       ],
     };
+  }
+}
+
+async function createOpenAIWeights(
+  apiKey: string,
+  modelName: string,
+  prompt: object,
+  tokens: TokenAnalysis[]
+) {
+  const body = JSON.stringify({
+    model: modelName,
+    max_output_tokens: 1200,
+    temperature: 0.2,
+    input: [
+      {
+        role: "user",
+        content: [
+          {
+            type: "input_text",
+            text: JSON.stringify(prompt),
+          },
+        ],
+      },
+    ],
+    text: {
+      format: {
+        type: "json_schema",
+        name: "indexforge_weights",
+        strict: true,
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          properties: {
+            weights: {
+              type: "array",
+              minItems: tokens.length,
+              maxItems: tokens.length,
+              items: {
+                type: "object",
+                additionalProperties: false,
+                properties: {
+                  symbol: {
+                    type: "string",
+                    enum: tokens.map((token) => token.symbol),
+                  },
+                  weight: {
+                    type: "number",
+                    minimum: 1,
+                    maximum: 100,
+                  },
+                  rationale: {
+                    type: "string",
+                    minLength: 12,
+                    maxLength: 180,
+                  },
+                },
+                required: ["symbol", "weight", "rationale"],
+              },
+            },
+          },
+          required: ["weights"],
+        },
+      },
+    },
+  });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
+      },
+      body,
+    });
+    const text = await response.text();
+    let data: OpenAIResponse;
+
+    try {
+      data = parseOpenAIJson(text);
+    } catch (error) {
+      if (response.status >= 500 && attempt === 0) {
+        await sleep(800);
+        continue;
+      }
+
+      throw error;
+    }
+
+    if (response.ok) {
+      return data;
+    }
+
+    if (response.status >= 500 && attempt === 0) {
+      await sleep(800);
+      continue;
+    }
+
+    throw new Error(data.error?.message ?? `OpenAI request failed with ${response.status}`);
+  }
+
+  throw new Error("OpenAI request failed after retry.");
+}
+
+function parseOpenAIJson(text: string): OpenAIResponse {
+  try {
+    return JSON.parse(text) as OpenAIResponse;
+  } catch {
+    throw new Error("OpenAI returned a non-JSON upstream response.");
   }
 }
 

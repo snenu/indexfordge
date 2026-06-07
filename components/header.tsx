@@ -11,10 +11,10 @@ export const Header = () => {
         </Link>
         <nav className="flex max-lg:hidden absolute left-1/2 -translate-x-1/2 items-center justify-center gap-x-10">
           {[
-            { name: "Composer", href: "#composer" },
-            { name: "Layers", href: "#layers" },
-            { name: "Roadmap", href: "#roadmap" },
-            { name: "Sources", href: "#sources" },
+            { name: "Designer", href: "/designer" },
+            { name: "Gallery", href: "/gallery" },
+            { name: "Creators", href: "/creators" },
+            { name: "Sources", href: "/designer#sources" },
           ].map((item) => (
             <Link
               className="uppercase inline-block font-mono text-foreground/60 hover:text-foreground/100 duration-150 transition-colors ease-out"
@@ -25,7 +25,7 @@ export const Header = () => {
             </Link>
           ))}
         </nav>
-        <Link className="uppercase max-lg:hidden transition-colors ease-out duration-150 font-mono text-primary hover:text-primary/80" href="/#composer">
+        <Link className="uppercase max-lg:hidden transition-colors ease-out duration-150 font-mono text-primary hover:text-primary/80" href="/designer">
           Build
         </Link>
         <MobileMenu />

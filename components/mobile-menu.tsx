@@ -14,10 +14,10 @@ export const MobileMenu = ({ className }: MobileMenuProps) => {
   const [isOpen, setIsOpen] = useState(false);
 
   const menuItems = [
-    { name: "Composer", href: "#composer" },
-    { name: "Layers", href: "#layers" },
-    { name: "Roadmap", href: "#roadmap" },
-    { name: "Sources", href: "#sources" },
+    { name: "Designer", href: "/designer" },
+    { name: "Gallery", href: "/gallery" },
+    { name: "Creators", href: "/creators" },
+    { name: "Sources", href: "/designer#sources" },
   ];
 
   const handleLinkClick = () => {
@@ -72,7 +72,7 @@ export const MobileMenu = ({ className }: MobileMenuProps) => {
 
             <div className="mt-6">
               <Link
-                href="/#composer"
+                href="/designer"
                 onClick={handleLinkClick}
                 className="inline-block text-xl font-mono uppercase text-primary transition-colors ease-out duration-150 hover:text-primary/80 py-2"
               >

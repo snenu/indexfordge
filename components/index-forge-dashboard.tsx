@@ -8,6 +8,8 @@ import {
   LineChart,
   Loader2,
   RefreshCw,
+  Save,
+  SlidersHorizontal,
   Sparkles,
   WandSparkles,
 } from "lucide-react";
@@ -19,6 +21,8 @@ import {
   TOKEN_UNIVERSE,
   type BacktestPoint,
   type IndexForgeResponse,
+  type PublishedIndexDraft,
+  type TokenUniverseItem,
   formatPct,
   formatUsd,
   uniqueSymbols,
@@ -27,13 +31,17 @@ import { cn } from "@/lib/utils";
 import { Pill } from "./pill";
 import { Button } from "./ui/button";
 
-async function requestComposition(theme: string, tokens: string[]) {
+async function requestComposition(
+  theme: string,
+  tokens: string[],
+  weights?: Array<{ symbol: string; weight: number }>
+) {
   const response = await fetch("/api/index-forge", {
     method: "POST",
     headers: {
       "content-type": "application/json",
     },
-    body: JSON.stringify({ theme, tokens }),
+    body: JSON.stringify({ theme, tokens, weights }),
   });
 
   if (!response.ok) {
@@ -44,12 +52,44 @@ async function requestComposition(theme: string, tokens: string[]) {
   return (await response.json()) as IndexForgeResponse;
 }
 
+async function requestUniverse() {
+const response = await fetch("/api/index-forge/universe");
+
+  if (!response.ok) return [];
+
+  const payload = (await response.json()) as { universe?: TokenUniverseItem[] };
+  return payload.universe ?? [];
+}
+
+const QUICK_PRESETS = [
+  {
+    label: "AI infra",
+    theme: DEFAULT_THEME,
+    tokens: DEFAULT_TOKENS,
+  },
+  {
+    label: "SoDEX majors",
+    theme: "SoDEX tradable majors",
+    tokens: ["BTC", "ETH", "SOL", "AAVE", "LINK"],
+  },
+  {
+    label: "DeFi core",
+    theme: "DeFi blue chips",
+    tokens: ["AAVE", "UNI", "LINK", "ETH", "SOL"],
+  },
+];
+
 export function IndexForgeDashboard() {
   const [theme, setTheme] = useState(DEFAULT_THEME);
   const [tokens, setTokens] = useState(DEFAULT_TOKENS);
   const [result, setResult] = useState<IndexForgeResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
+  const [universe, setUniverse] = useState<TokenUniverseItem[]>([]);
+  const [tokenSearch, setTokenSearch] = useState("");
+  const [manualWeights, setManualWeights] = useState<Record<string, number>>({});
+  const [creator, setCreator] = useState("");
+  const [publishMessage, setPublishMessage] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -60,6 +100,7 @@ export function IndexForgeDashboard() {
 
         if (active) {
           setResult(data);
+          setManualWeights(weightsFromComposition(data));
         }
       } catch (requestError) {
         if (active) {
@@ -73,23 +114,40 @@ export function IndexForgeDashboard() {
         if (active) {
           setLoading(false);
         }
+
+        void requestUniverse().then((items) => {
+          if (active) {
+            setUniverse(items);
+          }
+        });
       }
     }
 
     void loadInitialComposition();
+    window.requestAnimationFrame(() => {
+      if (active) {
+        setCreator(window.localStorage.getItem("indexforge:creator") ?? "");
+      }
+    });
 
     return () => {
       active = false;
     };
   }, []);
 
-  async function compose(nextTheme = theme, nextTokens = tokens) {
+  async function compose(
+    nextTheme = theme,
+    nextTokens = tokens,
+    nextWeights?: Array<{ symbol: string; weight: number }>
+  ) {
     setLoading(true);
     setError("");
+    setPublishMessage("");
 
     try {
-      const data = await requestComposition(nextTheme, nextTokens);
+      const data = await requestComposition(nextTheme, nextTokens, nextWeights);
       setResult(data);
+      setManualWeights(weightsFromComposition(data));
     } catch (requestError) {
       setError(
         requestError instanceof Error
@@ -112,7 +170,75 @@ export function IndexForgeDashboard() {
     });
   }
 
+  function setManualWeight(symbol: string, weight: number) {
+    setManualWeights((current) => ({
+      ...current,
+      [symbol]: weight,
+    }));
+  }
+
+  async function applyManualWeights() {
+    const fallbackWeight = Math.round(100 / Math.max(tokens.length, 1));
+    const weights = tokens.map((symbol) => ({
+      symbol,
+      weight: manualWeights[symbol] ?? fallbackWeight,
+    }));
+
+    await compose(theme, tokens, weights);
+  }
+
+  function publishDraft() {
+    if (!result || !creator.trim()) return;
+
+    const draft: PublishedIndexDraft = {
+      id: `${result.ssiDraft.manifest.id}-${Date.now()}`,
+      creator: creator.trim(),
+      indexName: result.indexName,
+      ticker: result.ticker,
+      theme: result.theme,
+      updatedAt: result.updatedAt,
+      returnPct: result.backtest.indexReturnPct,
+      maxDrawdownPct: result.backtest.maxDrawdownPct,
+      constituents: result.ssiDraft.manifest.constituents,
+      manifestId: result.ssiDraft.manifest.id,
+    };
+    const existing = readPublishedDrafts();
+
+    window.localStorage.setItem("indexforge:creator", creator.trim());
+    window.localStorage.setItem(
+      "indexforge:published-drafts",
+      JSON.stringify([draft, ...existing].slice(0, 24))
+    );
+    setPublishMessage("Draft saved to this browser. Open Gallery or Creators to review it.");
+  }
+
+  const fallbackManualWeight = Math.round(100 / Math.max(tokens.length, 1));
   const tokenInput = useMemo(() => tokens.join(", "), [tokens]);
+  const manualTotal = tokens.reduce(
+    (sum, symbol) => sum + (manualWeights[symbol] ?? fallbackManualWeight),
+    0
+  );
+  const filteredUniverse = useMemo(() => {
+    const query = tokenSearch.trim().toUpperCase();
+    const liveSymbols = universe.length
+      ? universe
+      : TOKEN_UNIVERSE.map((symbol) => ({ currencyId: symbol, symbol, name: symbol }));
+    const bySymbol = new Map(liveSymbols.map((item) => [item.symbol, item]));
+
+    if (query) {
+      return liveSymbols
+        .filter(
+          (item) => item.symbol.includes(query) || item.name.toUpperCase().includes(query)
+        )
+        .slice(0, 24);
+    }
+
+    return uniqueUniverseItems(
+      [...tokens, ...TOKEN_UNIVERSE].map(
+        (symbol) => bySymbol.get(symbol) ?? { currencyId: symbol, symbol, name: symbol }
+      )
+    ).slice(0, 24);
+  }, [tokenSearch, tokens, universe]);
   const totalFlow = result?.tokens.reduce((sum, token) => sum + token.metrics.flow30dUsd, 0) ?? 0;
   const updatedAt = result
     ? new Intl.DateTimeFormat("en", {
@@ -159,17 +285,45 @@ export function IndexForgeDashboard() {
                   placeholder="TAO, RENDER, FET, AKT, NMR"
                 />
               </label>
+
+              <label className="block">
+                <span className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+                  Live token search
+                </span>
+                <input
+                  value={tokenSearch}
+                  onChange={(event) => setTokenSearch(event.target.value)}
+                  className="mt-3 w-full bg-transparent font-mono text-sm uppercase text-foreground outline-none placeholder:text-foreground/25"
+                  placeholder="Search SoSoValue universe"
+                />
+              </label>
             </div>
 
             <div className="flex flex-wrap gap-2">
-              {TOKEN_UNIVERSE.map((symbol) => {
-                const active = tokens.includes(symbol);
+              {QUICK_PRESETS.map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    setTheme(preset.theme);
+                    setTokens(preset.tokens);
+                    setTokenSearch("");
+                    setManualWeights({});
+                    setPublishMessage(`${preset.label} preset staged.`);
+                  }}
+                  className="h-9 border border-primary/55 px-3 font-mono text-xs uppercase text-primary transition-colors [clip-path:polygon(7px_0,100%_0,100%_calc(100%_-_7px),calc(100%_-_7px)_100%,0_100%,0_7px)] hover:border-primary hover:bg-primary hover:text-black"
+                >
+                  {preset.label}
+                </button>
+              ))}
+              {filteredUniverse.map((item) => {
+                const active = tokens.includes(item.symbol);
 
                 return (
                   <button
-                    key={symbol}
+                    key={item.currencyId}
                     type="button"
-                    onClick={() => toggleToken(symbol)}
+                    onClick={() => toggleToken(item.symbol)}
                     className={cn(
                       "h-9 border px-3 font-mono text-xs uppercase transition-colors [clip-path:polygon(7px_0,100%_0,100%_calc(100%_-_7px),calc(100%_-_7px)_100%,0_100%,0_7px)]",
                       active
@@ -178,11 +332,50 @@ export function IndexForgeDashboard() {
                     )}
                     aria-pressed={active}
                   >
-                    {symbol}
+                    {item.symbol}
                   </button>
                 );
               })}
             </div>
+
+            <div className="space-y-3 border-y border-border/70 py-5">
+              <div className="flex items-center justify-between gap-3 font-mono text-xs uppercase text-foreground/45">
+                <span>Manual weights</span>
+                <span>{manualTotal.toFixed(0)}% target</span>
+              </div>
+              <div className="space-y-4">
+                {tokens.map((symbol) => (
+                  <label key={symbol} className="grid gap-2">
+                    <div className="flex items-center justify-between font-mono text-xs uppercase">
+                      <span className="text-foreground/65">{symbol}</span>
+                      <span className="text-primary">
+                        {(manualWeights[symbol] ?? fallbackManualWeight).toFixed(0)}%
+                      </span>
+                    </div>
+                    <input
+                      type="range"
+                      min="1"
+                      max="60"
+                      value={manualWeights[symbol] ?? fallbackManualWeight}
+                      onChange={(event) => setManualWeight(symbol, Number(event.target.value))}
+                      className="w-full accent-primary"
+                    />
+                  </label>
+                ))}
+              </div>
+            </div>
+
+            <label className="block border-b border-border/70 pb-5">
+              <span className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+                Creator profile
+              </span>
+              <input
+                value={creator}
+                onChange={(event) => setCreator(event.target.value)}
+                className="mt-3 w-full bg-transparent font-mono text-sm text-foreground outline-none placeholder:text-foreground/25"
+                placeholder="Creator name"
+              />
+            </label>
 
             <div className="flex flex-wrap items-center gap-4">
               <Button
@@ -194,6 +387,24 @@ export function IndexForgeDashboard() {
                 {loading ? <Loader2 className="animate-spin" /> : <WandSparkles />}
                 [Compose]
               </Button>
+              <Button
+                type="button"
+                onClick={() => void applyManualWeights()}
+                disabled={loading || tokens.length < 3}
+                className="min-w-[190px]"
+              >
+                {loading ? <Loader2 className="animate-spin" /> : <SlidersHorizontal />}
+                [Run Sliders]
+              </Button>
+              <Button
+                type="button"
+                onClick={publishDraft}
+                disabled={!result || !creator.trim()}
+                className="min-w-[190px]"
+              >
+                <Save />
+                [Save Draft]
+              </Button>
               <button
                 type="button"
                 onClick={() => {
@@ -204,9 +415,15 @@ export function IndexForgeDashboard() {
                 className="inline-flex h-12 items-center gap-2 border-b border-border font-mono text-xs uppercase text-foreground/55 transition-colors hover:text-foreground"
               >
                 <RefreshCw className="size-4" />
-                Reset wave demo
+                Reset index
               </button>
             </div>
+
+            {publishMessage ? (
+              <div className="border-l border-primary pl-4 font-mono text-sm text-primary">
+                {publishMessage}
+              </div>
+            ) : null}
 
             {error ? (
               <div className="border-l border-primary pl-4 font-mono text-sm text-primary">
@@ -218,7 +435,9 @@ export function IndexForgeDashboard() {
           <div className="space-y-10">
             <MetricStrip result={result} totalFlow={totalFlow} loading={loading} />
             <Composition result={result} loading={loading} />
+            <Transparency result={result} loading={loading} />
             <Performance result={result} loading={loading} />
+            <Execution result={result} loading={loading} />
           </div>
         </div>
       </section>
@@ -249,12 +468,12 @@ export function IndexForgeDashboard() {
             <LayerRow
               icon={<Gem />}
               label={result?.ssiDraft.chain ?? "SSI Protocol"}
-              value={result?.ssiDraft.status ?? "Draft deploy path for Wave 3"}
+              value={result?.ssiDraft.status ?? "Unsigned SSI manifest"}
             />
             <LayerRow
               icon={<ArrowUpRight />}
-              label="SoDEX"
-              value={result?.ssiDraft.sodexMode ?? "Copy-trade mirror route"}
+                label="SoDEX"
+                value={result?.sodexIntent.status ?? "Testnet rebalance intent"}
             />
           </div>
         </div>
@@ -263,29 +482,29 @@ export function IndexForgeDashboard() {
       <section id="roadmap" className="py-14 sm:py-16">
         <div className="container grid gap-8 lg:grid-cols-[0.8fr_1.2fr] lg:gap-16">
           <div>
-            <Pill className="mb-5">BUILD PLAN</Pill>
+            <Pill className="mb-5">VALIDATION</Pill>
             <h2 className="font-sentient text-4xl leading-tight sm:text-5xl">
-              Wave roadmap to <i>live funds</i>
+              Evidence before <i>execution</i>
             </h2>
           </div>
           <div className="grid gap-0 border-y border-border/70">
             <RoadmapRow
-              wave="Wave 1"
-              date="May 12, 2026"
-              status="Live now"
-              detail="SoSoValue data, AI weights, bars, backtest, README, demo-ready UI."
+              wave="Data"
+              date="SoSoValue"
+              status="Live"
+              detail="Currency snapshots, daily klines, and SSI index references are fetched from the API route."
             />
             <RoadmapRow
-              wave="Wave 2"
-              date="May 18-29, 2026"
-              status="Product"
-              detail="Full designer, sliders, public gallery, SoDEX testnet order simulation."
+              wave="Model"
+              date="IndexForge"
+              status="Visible"
+              detail="Theme fit, momentum, flow, liquidity, market-cap rank, and volatility inputs are shown per token."
             />
             <RoadmapRow
-              wave="Wave 3"
-              date="Jun 4-15, 2026"
-              status="Production"
-              detail="SSI deploys, SoDEX copy-trading, rebalance engine, creator fees."
+              wave="Execution"
+              date="ValueChain"
+              status="Prepared"
+              detail="The app produces an SSI manifest and a SoDEX testnet batch intent; signed submission waits for credentials."
             />
           </div>
         </div>
@@ -316,12 +535,12 @@ function MetricStrip({
   const metrics = [
     {
       icon: <LineChart />,
-      label: "Index 30d",
+      label: result ? `Index ${result.backtest.periodDays}d` : "Index",
       value: result ? formatPct(result.backtest.indexReturnPct) : "Waiting",
     },
     {
       icon: <Activity />,
-      label: "BTC 30d",
+      label: result ? `BTC ${result.backtest.periodDays}d` : "BTC",
       value: result ? formatPct(result.backtest.btcReturnPct) : "Waiting",
     },
     {
@@ -432,6 +651,55 @@ function Composition({
   );
 }
 
+function Transparency({
+  result,
+  loading,
+}: {
+  result: IndexForgeResponse | null;
+  loading: boolean;
+}) {
+  if (!result && loading) {
+    return <div className="h-56 animate-pulse border-y border-border/70 bg-white/[0.03]" />;
+  }
+
+  if (!result) return null;
+
+  return (
+    <div className="border-y border-border/70 py-5">
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+            Weighting model
+          </div>
+          <h3 className="mt-1 font-sentient text-3xl">Signal transparency</h3>
+        </div>
+        <div className="font-mono text-xs uppercase text-foreground/45">
+          {result.model.usedOpenAI ? "OpenAI weights + quant audit" : "Quant weights"}
+        </div>
+      </div>
+
+      <div className="grid gap-0 border-t border-border/60">
+        {result.composition.map((item) => (
+          <div
+            key={item.symbol}
+            className="grid gap-4 border-b border-border/50 py-4 last:border-b-0 md:grid-cols-[92px_1fr]"
+          >
+            <div className="font-mono text-sm uppercase text-primary">{item.symbol}</div>
+            <div className="grid gap-2 sm:grid-cols-2">
+              <ScoreChip label="Theme" value={item.score?.themeFit} />
+              <ScoreChip label="Momentum" value={item.score?.momentum} />
+              <ScoreChip label="Flow" value={item.score?.flowTrend} />
+              <ScoreChip label="Liquidity" value={item.score?.liquidity} />
+              <ScoreChip label="Market cap" value={item.score?.marketCapRank} />
+              <ScoreChip label="Risk control" value={item.score?.volatilityPenalty} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function Performance({
   result,
   loading,
@@ -452,7 +720,9 @@ function Performance({
           <div className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
             Backtest
           </div>
-          <h3 className="mt-1 font-sentient text-3xl">Index vs BTC</h3>
+          <h3 className="mt-1 font-sentient text-3xl">
+            {result.backtest.periodDays || result.backtest.points.length}d index vs BTC
+          </h3>
         </div>
         <div className="flex gap-4 font-mono text-xs uppercase">
           <span className="text-primary">Index</span>
@@ -460,10 +730,47 @@ function Performance({
         </div>
       </div>
       <PerformanceChart points={result.backtest.points} />
+      <div className="mt-4 grid gap-3 border-t border-border/60 pt-4 sm:grid-cols-4">
+        <BacktestMetric label="Drawdown" value={formatPct(result.backtest.maxDrawdownPct)} />
+        <BacktestMetric label="Volatility" value={formatPct(result.backtest.volatilityPct)} />
+        <BacktestMetric label="Win rate" value={formatPct(result.backtest.winRatePct)} />
+        <BacktestMetric label="Sharpe" value={result.backtest.sharpeRatio.toFixed(2)} />
+      </div>
+      <div className="mt-3 grid gap-3 sm:grid-cols-4">
+        <BacktestMetric
+          label="Holdout index"
+          value={formatPct(result.backtest.validation.holdoutIndexReturnPct)}
+        />
+        <BacktestMetric
+          label="Holdout BTC"
+          value={formatPct(result.backtest.validation.holdoutBtcReturnPct)}
+        />
+        <BacktestMetric
+          label="Effective names"
+          value={result.backtest.validation.effectiveNames.toFixed(2)}
+        />
+        <BacktestMetric
+          label="Max weight"
+          value={formatPlainPct(result.backtest.validation.maxWeightPct)}
+        />
+      </div>
       <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2 font-mono text-[11px] uppercase text-foreground/40">
         <span>Drawdown {formatPct(result.backtest.maxDrawdownPct)}</span>
         <span>{result.backtest.points.length} daily SoSoValue closes</span>
         <span>{result.ssiDraft.rebalance}</span>
+        <span>{result.backtest.rebalanceCount} rebalances</span>
+        <span>
+          {result.backtest.validation.concentrationPass ? "Concentration pass" : "Concentration watch"}
+        </span>
+        <span>{result.backtest.validation.liquidityPass ? "Liquidity pass" : "Liquidity watch"}</span>
+      </div>
+      <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[10px] uppercase leading-5 text-foreground/35">
+        {result.backtest.assumptions.map((assumption) => (
+          <span key={assumption}>{assumption}</span>
+        ))}
+        {result.backtest.validation.overfitNotes.map((note) => (
+          <span key={note}>{note}</span>
+        ))}
       </div>
     </div>
   );
@@ -532,6 +839,115 @@ function PerformanceChart({ points }: { points: BacktestPoint[] }) {
   );
 }
 
+function Execution({
+  result,
+  loading,
+}: {
+  result: IndexForgeResponse | null;
+  loading: boolean;
+}) {
+  if (!result && loading) {
+    return <div className="h-64 animate-pulse border-y border-border/70 bg-white/[0.03]" />;
+  }
+
+  if (!result) return null;
+
+  return (
+    <div className="border-y border-border/70 py-5">
+      <div className="mb-5">
+        <div className="font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+          SSI + SoDEX
+        </div>
+        <h3 className="mt-1 font-sentient text-3xl">Publish path</h3>
+      </div>
+
+      <div className="grid gap-0 border-t border-border/60">
+        <div className="grid gap-4 border-b border-border/50 py-4 md:grid-cols-[150px_1fr]">
+          <div className="font-mono text-xs uppercase text-primary">Manifest</div>
+          <div>
+            <div className="font-mono text-sm uppercase text-foreground">
+              {result.ssiDraft.manifest.id}
+            </div>
+            <p className="mt-2 text-sm leading-6 text-foreground/55">
+              {result.ssiDraft.manifest.methodology}
+            </p>
+          </div>
+        </div>
+
+        <div className="grid gap-4 border-b border-border/50 py-4 md:grid-cols-[150px_1fr]">
+          <div className="font-mono text-xs uppercase text-primary">SSI references</div>
+          <div className="grid gap-3">
+            {result.ssiReferences.length ? (
+              result.ssiReferences.map((reference) => (
+                <div
+                  key={reference.ticker}
+                  className="grid gap-2 border-b border-border/35 pb-3 last:border-b-0 last:pb-0 sm:grid-cols-[110px_1fr]"
+                >
+                  <div className="font-mono text-sm uppercase text-foreground">
+                    {reference.label}
+                  </div>
+                  <div className="flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase text-foreground/45">
+                    <span>{formatPlainPct(reference.overlapPct)} overlap</span>
+                    <span>{reference.constituentCount} constituents</span>
+                    <span>1m {formatOptionalPct(reference.return1mPct)}</span>
+                    <span>3m {formatOptionalPct(reference.return3mPct)}</span>
+                    <span>{reference.matchedSymbols.join(", ") || "No shared symbols"}</span>
+                  </div>
+                </div>
+              ))
+            ) : (
+              <div className="font-mono text-xs uppercase text-foreground/45">
+                SSI reference data unavailable
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="grid gap-4 py-4 md:grid-cols-[150px_1fr]">
+          <div className="font-mono text-xs uppercase text-primary">SoDEX intent</div>
+          <div>
+            <div className="font-mono text-sm uppercase text-foreground">
+              {result.sodexIntent.network} / {result.sodexIntent.mode}
+            </div>
+            <p className="mt-2 text-sm leading-6 text-foreground/55">
+              {result.sodexIntent.status}
+            </p>
+            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-2 font-mono text-[11px] uppercase text-foreground/40">
+              <span>{result.sodexIntent.orders.length} market orders</span>
+              <span>{result.sodexIntent.requiredHeaders.join(", ")}</span>
+              <span className="break-all">{result.sodexIntent.orderEndpoint}</span>
+            </div>
+            <div className="mt-4 grid gap-2">
+              {result.sodexIntent.orders.map((order) => (
+                <div
+                  key={order.symbol}
+                  className="grid gap-2 border-t border-border/35 pt-3 sm:grid-cols-[90px_1fr_120px]"
+                >
+                  <span className="font-mono text-xs uppercase text-foreground">
+                    {order.symbol}
+                  </span>
+                  <span className="font-mono text-[11px] uppercase text-foreground/45">
+                    {order.displayName ?? order.market ?? "No testnet market"} /{" "}
+                    {order.minNotional ? `min ${order.minNotional} USDC` : "min notional n/a"}
+                  </span>
+                  <span
+                    className={cn(
+                      "font-mono text-[11px] uppercase",
+                      order.executable ? "text-primary" : "text-foreground/35"
+                    )}
+                  >
+                    {order.marketStatus}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LayerRow({
   icon,
   label,
@@ -548,6 +964,24 @@ function LayerRow({
         <span>{label}</span>
       </div>
       <div className="text-lg text-foreground/70">{value}</div>
+    </div>
+  );
+}
+
+function ScoreChip({ label, value }: { label: string; value?: number }) {
+  return (
+    <div className="flex min-h-10 items-center justify-between gap-3 border border-border/50 px-3 py-2 font-mono text-[11px] uppercase">
+      <span className="text-foreground/40">{label}</span>
+      <span className="text-foreground">{value === undefined ? "--" : `${value.toFixed(0)}`}</span>
+    </div>
+  );
+}
+
+function BacktestMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="border border-border/50 px-3 py-3">
+      <div className="font-mono text-[10px] uppercase text-foreground/40">{label}</div>
+      <div className="mt-1 font-sentient text-2xl text-foreground">{value}</div>
     </div>
   );
 }
@@ -573,4 +1007,36 @@ function RoadmapRow({
       </div>
     </div>
   );
+}
+
+function formatOptionalPct(value: number | null) {
+  return value === null ? "--" : formatPct(value);
+}
+
+function formatPlainPct(value: number) {
+  return `${value.toFixed(2)}%`;
+}
+
+function weightsFromComposition(result: IndexForgeResponse) {
+  return Object.fromEntries(result.composition.map((item) => [item.symbol, item.weight]));
+}
+
+function uniqueUniverseItems(items: TokenUniverseItem[]) {
+  const seen = new Set<string>();
+
+  return items.filter((item) => {
+    if (seen.has(item.symbol)) return false;
+    seen.add(item.symbol);
+    return true;
+  });
+}
+
+function readPublishedDrafts(): PublishedIndexDraft[] {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem("indexforge:published-drafts") ?? "[]");
+
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
 }

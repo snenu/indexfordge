@@ -55,12 +55,77 @@ export type WeightSuggestion = {
   symbol: string;
   weight: number;
   rationale: string;
+  score?: {
+    themeFit: number;
+    momentum: number;
+    flowTrend: number;
+    flowScale: number;
+    liquidity: number;
+    marketCapRank: number;
+    volatilityPenalty: number;
+    composite: number;
+  };
 };
 
 export type BacktestPoint = {
   date: string;
   index: number;
   btc: number;
+};
+
+export type SsiReference = {
+  ticker: string;
+  label: string;
+  overlapPct: number;
+  constituentCount: number;
+  matchedSymbols: string[];
+  price: number | null;
+  return1mPct: number | null;
+  return3mPct: number | null;
+  return1yPct: number | null;
+  ytdPct: number | null;
+};
+
+export type TokenUniverseItem = {
+  currencyId: string;
+  symbol: string;
+  name: string;
+};
+
+export type SodexIntent = {
+  mode: string;
+  network: string;
+  marketDataEndpoint: string;
+  orderEndpoint: string;
+  status: string;
+  requiresSignature: boolean;
+  requiredHeaders: string[];
+  orders: Array<{
+    symbol: string;
+    market: string | null;
+    displayName: string | null;
+    marketStatus: string;
+    minNotional: string | null;
+    executable: boolean;
+    side: "buy";
+    type: "market";
+    timeInForce: "IOC";
+    targetWeightPct: number;
+    quoteAllocationPct: number;
+  }>;
+  notes: string[];
+};
+
+export type ValidationReport = {
+  trainingDays: number;
+  holdoutDays: number;
+  holdoutIndexReturnPct: number;
+  holdoutBtcReturnPct: number;
+  effectiveNames: number;
+  maxWeightPct: number;
+  concentrationPass: boolean;
+  liquidityPass: boolean;
+  overfitNotes: string[];
 };
 
 export type IndexForgeResponse = {
@@ -72,15 +137,23 @@ export type IndexForgeResponse = {
   composition: WeightSuggestion[];
   backtest: {
     points: BacktestPoint[];
+    periodDays: number;
     indexReturnPct: number;
     btcReturnPct: number;
     maxDrawdownPct: number;
+    volatilityPct: number;
+    sharpeRatio: number;
+    winRatePct: number;
+    rebalanceCount: number;
+    assumptions: string[];
+    validation: ValidationReport;
   };
   model: {
     provider: "OpenAI" | "IndexForge Quant";
     name: string;
     usedOpenAI: boolean;
     note?: string;
+    objective: string;
   };
   ssiDraft: {
     name: string;
@@ -89,7 +162,18 @@ export type IndexForgeResponse = {
     chain: string;
     sodexMode: string;
     status: string;
+    manifest: {
+      id: string;
+      methodology: string;
+      dataWindowDays: number;
+      constituents: Array<{
+        symbol: string;
+        weightPct: number;
+      }>;
+    };
   };
+  ssiReferences: SsiReference[];
+  sodexIntent: SodexIntent;
   unresolved: string[];
   warnings: string[];
   sources: {
@@ -98,11 +182,31 @@ export type IndexForgeResponse = {
   }[];
 };
 
-export function normalizeSymbol(symbol: string) {
-  return symbol.trim().replace(/^\$/, "").toUpperCase();
+export type PublishedIndexDraft = {
+  id: string;
+  creator: string;
+  indexName: string;
+  ticker: string;
+  theme: string;
+  updatedAt: string;
+  returnPct: number;
+  maxDrawdownPct: number;
+  constituents: Array<{
+    symbol: string;
+    weightPct: number;
+  }>;
+  manifestId: string;
+};
+
+export type SsiGalleryItem = SsiReference & {
+  source: "SoSoValue Indexes";
+};
+
+export function normalizeSymbol(symbol: unknown) {
+  return typeof symbol === "string" ? symbol.trim().replace(/^\$/, "").toUpperCase() : "";
 }
 
-export function uniqueSymbols(symbols: string[]) {
+export function uniqueSymbols(symbols: unknown[]) {
   return Array.from(
     new Set(symbols.map(normalizeSymbol).filter((symbol) => symbol.length > 0))
   );

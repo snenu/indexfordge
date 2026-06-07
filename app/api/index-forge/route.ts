@@ -5,9 +5,11 @@ import {
   type BacktestPoint,
   type HistoryPoint,
   type IndexForgeResponse,
+  type SsiReference,
   type TokenAnalysis,
   type WeightSuggestion,
   buildTicker,
+  normalizeSymbol,
   uniqueSymbols,
 } from "@/lib/index-forge";
 
@@ -22,14 +24,21 @@ const SOURCES = [
     url: "https://sosovalue-1.gitbook.io/sosovalue-api-doc",
   },
   {
-    name: "SoDEX documentation",
-    url: "https://sodex.com/documentation",
+    name: "SoSoValue Indexes",
+    url: "https://ssi.sosovalue.com/en",
+  },
+  {
+    name: "SoDEX Trading API",
+    url: "https://sodex.com/documentation/trading-api/trading-api",
   },
   {
     name: "OpenAI Responses API",
     url: "https://developers.openai.com/api/reference/resources/responses/methods/create",
   },
 ];
+
+const MODEL_OBJECTIVE =
+  "Maximize theme fit and risk-adjusted exposure using live SoSoValue momentum, 30d traded activity, flow trend, liquidity, market-cap rank, and volatility controls.";
 
 type SosoEnvelope<T> = {
   code: number;
@@ -63,7 +72,21 @@ type MarketSnapshot = {
 type Kline = {
   timestamp: number | string;
   close: number | string;
-  volume: number | string;
+  volume?: number | string;
+};
+
+type IndexConstituent = {
+  currency_id?: string;
+  symbol?: string;
+  weight?: number | string;
+};
+
+type IndexSnapshot = {
+  price?: number | string;
+  "1month_roi"?: number | string;
+  "3month_roi"?: number | string;
+  "1year_roi"?: number | string;
+  ytd?: number | string;
 };
 
 type OpenAIResponse = {
@@ -86,6 +109,24 @@ type ComposerPayload = {
   }>;
 };
 
+type ManualWeight = {
+  symbol?: string;
+  weight?: number;
+};
+
+type SodexSymbol = {
+  name?: string;
+  displayName?: string;
+  baseCoin?: string;
+  quoteCoin?: string;
+  minNotional?: string;
+  status?: string;
+};
+
+type SosoFetchOptions = {
+  retryRateLimit?: boolean;
+};
+
 class RouteError extends Error {
   constructor(
     message: string,
@@ -97,37 +138,61 @@ class RouteError extends Error {
 
 let currencyCache: { loadedAt: number; data: Currency[] } | null = null;
 const responseCache = new Map<string, { loadedAt: number; data: unknown }>();
+const inFlightSosoFetches = new Map<string, Promise<unknown>>();
+const compositionCache = new Map<string, { loadedAt: number; data: IndexForgeResponse }>();
+const requestWindows = new Map<string, { resetAt: number; count: number }>();
+const COMPOSITION_CACHE_TTL_MS = 60 * 1000;
+const COMPOSER_RATE_LIMIT = 12;
+const COMPOSER_RATE_WINDOW_MS = 60 * 1000;
 
 export async function GET(request: Request) {
-  const url = new URL(request.url);
-  const theme = url.searchParams.get("theme") ?? DEFAULT_THEME;
-  const tokens = url.searchParams.get("tokens")?.split(",") ?? DEFAULT_TOKENS;
+  try {
+    assertRequestAllowed(request);
 
-  return handleRequest({ theme, tokens });
+    const url = new URL(request.url);
+    const theme = url.searchParams.get("theme") ?? DEFAULT_THEME;
+    const tokens = coerceTokenInput(url.searchParams.get("tokens"));
+
+    return handleRequest({ theme, tokens });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
 export async function POST(request: Request) {
-  const body = await request.json().catch(() => ({}));
+  try {
+    assertRequestAllowed(request);
 
-  return handleRequest({
-    theme: typeof body.theme === "string" ? body.theme : DEFAULT_THEME,
-    tokens: Array.isArray(body.tokens) ? body.tokens : DEFAULT_TOKENS,
-  });
+    const body = await request.json().catch(() => ({}));
+    const payload = isRecord(body) ? body : {};
+
+    return handleRequest({
+      theme: typeof payload.theme === "string" ? payload.theme : DEFAULT_THEME,
+      tokens: coerceTokenInput(payload.tokens),
+      weights: coerceManualWeightInput(payload.weights),
+    });
+  } catch (error) {
+    return errorResponse(error);
+  }
 }
 
-async function handleRequest(input: { theme: string; tokens: string[] }) {
+async function handleRequest(input: { theme: string; tokens: string[]; weights?: ManualWeight[] }) {
   try {
     const theme = cleanTheme(input.theme);
     const requestedSymbols = uniqueSymbols(input.tokens).slice(0, 8);
+    const cacheKey = buildCompositionCacheKey(theme, requestedSymbols, input.weights);
+    const cached = compositionCache.get(cacheKey);
+
+    if (cached && Date.now() - cached.loadedAt < COMPOSITION_CACHE_TTL_MS) {
+      return NextResponse.json(cached.data);
+    }
 
     if (requestedSymbols.length < 3) {
       throw new RouteError("Pick at least 3 token symbols for an index.", 400);
     }
 
     const currencies = await getCurrencies();
-    const bySymbol = new Map(
-      currencies.map((currency) => [currency.symbol.toUpperCase(), currency])
-    );
+    const bySymbol = new Map(currencies.map((currency) => [currency.symbol, currency]));
     const unresolved = requestedSymbols.filter((symbol) => !bySymbol.has(symbol));
     const resolved = requestedSymbols
       .map((symbol) => bySymbol.get(symbol))
@@ -150,7 +215,7 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
         tokens.push(await getTokenAnalysis(currency));
       } catch (error) {
         warnings.push(
-          `${currency.symbol.toUpperCase()} could not be loaded: ${
+          `${currency.symbol} could not be loaded: ${
             error instanceof Error ? error.message : "unknown error"
           }`
         );
@@ -159,7 +224,14 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
     }
 
     if (tokens.length < 3) {
-      throw new RouteError("Not enough SoSoValue token data returned to compose an index.", 502);
+      const rateLimited = warnings.some((warning) => warning.toLowerCase().includes("rate limit"));
+
+      throw new RouteError(
+        rateLimited
+          ? "SoSoValue rate limit exceeded while loading token history. Please retry after the API window resets."
+          : "Not enough SoSoValue token data returned to compose an index.",
+        rateLimited ? 429 : 502
+      );
     }
 
     const btcCurrency = bySymbol.get("BTC");
@@ -179,14 +251,30 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
     }
 
     benchmark ??= tokens[0];
-    await enrichWithSnapshots(tokens);
+    warnings.push(...(await enrichWithSnapshots(tokens)));
 
     const fallbackComposition = composeFromMarketData(theme, tokens);
-    const ai = await composeWithOpenAI(theme, tokens, fallbackComposition);
+    const manualComposition = coerceManualWeights(input.weights, tokens, fallbackComposition);
+    const ai = manualComposition
+      ? {
+          composition: manualComposition,
+          model: {
+            provider: "IndexForge Quant" as const,
+            name: "Manual Wave 2 designer",
+            usedOpenAI: false,
+            note: "Weights were supplied by the designer sliders and normalized before backtest.",
+            objective: MODEL_OBJECTIVE,
+          },
+          warnings: [],
+        }
+      : await composeWithOpenAI(theme, tokens, fallbackComposition);
     const composition = ai.composition;
     const backtest = buildBacktest(tokens, composition, benchmark.history);
     const ticker = buildTicker(theme);
     const indexName = `${titleCase(theme)} Index`;
+    const ssiLookup = await getSsiReferences(composition, tokens.length <= 5 ? 1 : 0);
+    const manifest = buildSsiManifest(indexName, ticker, composition, backtest.periodDays);
+    const sodex = await buildSodexIntent(composition);
 
     const response: IndexForgeResponse = {
       theme,
@@ -200,24 +288,26 @@ async function handleRequest(input: { theme: string; tokens: string[] }) {
       ssiDraft: {
         name: indexName,
         ticker,
-        rebalance: "Weekly rebalance draft",
+        rebalance: "Weekly target-weight rebalance",
         chain: "ValueChain / SSI Protocol",
-        sodexMode: "SoDEX copy-trade payload preview",
+        sodexMode: "SoDEX testnet rebalance intent",
         status: process.env.SSI_PROTOCOL_KEY
-          ? "Ready for SSI submit route"
-          : "Awaiting SSI credentials",
+          ? "Ready for credentialed SSI submit route"
+          : "Unsigned SSI manifest ready; add SSI credentials to submit.",
+        manifest,
       },
+      ssiReferences: ssiLookup.references,
+      sodexIntent: sodex.intent,
       unresolved,
-      warnings: [...warnings, ...ai.warnings],
+      warnings: [...warnings, ...ai.warnings, ...ssiLookup.warnings, ...sodex.warnings],
       sources: SOURCES,
     };
 
+    setCompositionCache(cacheKey, response);
+
     return NextResponse.json(response);
   } catch (error) {
-    const status = error instanceof RouteError ? error.status : 500;
-    const message = error instanceof Error ? error.message : "IndexForge failed to compose.";
-
-    return NextResponse.json({ message }, { status });
+    return errorResponse(error);
   }
 }
 
@@ -226,9 +316,19 @@ async function getCurrencies() {
     return currencyCache.data;
   }
 
-  const data = await sosoFetch<Currency[]>("/currencies");
+  const data = (await sosoFetch<Currency[]>("/currencies"))
+    .map(normalizeCurrency)
+    .filter((currency) => currency.currency_id && currency.symbol && currency.name);
   currencyCache = { loadedAt: Date.now(), data };
   return data;
+}
+
+function normalizeCurrency(currency: Currency): Currency {
+  return {
+    currency_id: String(currency.currency_id ?? "").trim(),
+    symbol: normalizeSymbol(currency.symbol ?? ""),
+    name: String(currency.name ?? "").trim(),
+  };
 }
 
 async function getTokenAnalysis(currency: Currency): Promise<TokenAnalysis> {
@@ -236,22 +336,23 @@ async function getTokenAnalysis(currency: Currency): Promise<TokenAnalysis> {
 }
 
 function buildBenchmarkToken(currency: Currency, klines: Kline[]): TokenAnalysis {
-  const history = normalizeHistory(klines).slice(-30);
-  const firstClose = history[0]?.close ?? 0;
-  const lastClose = history.at(-1)?.close ?? firstClose;
-  const previousClose = history.at(-2)?.close ?? firstClose;
-  const latestFlow = history.at(-1)?.dollarVolume ?? 0;
-  const dollarVolumes = history.map((point) => point.dollarVolume);
+  const history = normalizeHistory(klines).slice(-90);
+  const metricWindow = history.slice(-31);
+  const firstClose = metricWindow[0]?.close ?? 0;
+  const lastClose = metricWindow.at(-1)?.close ?? firstClose;
+  const previousClose = metricWindow.at(-2)?.close ?? firstClose;
+  const latestFlow = metricWindow.at(-1)?.dollarVolume ?? 0;
+  const dollarVolumes = metricWindow.slice(-30).map((point) => point.dollarVolume);
   const recentFlow = average(dollarVolumes.slice(-7));
   const previousFlow = average(dollarVolumes.slice(-14, -7));
-  const dailyReturns = history
+  const dailyReturns = metricWindow
     .slice(1)
-    .map((point, index) => point.close / history[index].close - 1)
+    .map((point, index) => point.close / metricWindow[index].close - 1)
     .filter(Number.isFinite);
 
   return {
     currencyId: currency.currency_id,
-    symbol: currency.symbol.toUpperCase(),
+    symbol: currency.symbol,
     name: currency.name,
     sectors: [],
     introduction: "",
@@ -273,29 +374,39 @@ function buildBenchmarkToken(currency: Currency, klines: Kline[]): TokenAnalysis
 }
 
 async function getKlines(currencyId: string) {
-  return sosoFetch<Kline[]>(`/currencies/${currencyId}/klines?interval=1d&limit=31`);
+  return sosoFetch<Kline[]>(`/currencies/${currencyId}/klines?interval=1d&limit=91`);
 }
 
 async function enrichWithSnapshots(tokens: TokenAnalysis[]) {
+  const warnings: string[] = [];
+  const includeProjectInfo = process.env.SOSOVALUE_ENABLE_PROJECT_INFO === "true";
+
   for (const token of tokens) {
     try {
       await sleep(120);
-      const [snapshot, info] = await Promise.all([
-        sosoFetch<MarketSnapshot>(`/currencies/${token.currencyId}/market-snapshot`),
-        sosoFetch<CurrencyInfo>(`/currencies/${token.currencyId}`).catch(() => null),
-      ]);
+      const snapshot = await sosoFetch<MarketSnapshot>(
+        `/currencies/${token.currencyId}/market-snapshot`,
+        { retryRateLimit: false }
+      );
 
-      token.name = info?.name || token.name;
-      token.sectors =
-        info?.sector
-          ?.map((sector) => sector.name)
-          .filter((sector): sector is string => Boolean(sector)) ?? token.sectors;
-      token.introduction = stripHtml(info?.introduction ?? token.introduction);
+      if (includeProjectInfo) {
+        const info = await sosoFetch<CurrencyInfo>(`/currencies/${token.currencyId}`).catch(
+          () => null
+        );
+
+        token.name = info?.name?.trim() || token.name;
+        token.sectors =
+          info?.sector
+            ?.map((sector) => sector.name?.trim())
+            .filter((sector): sector is string => Boolean(sector)) ?? token.sectors;
+        token.introduction = stripHtml(info?.introduction ?? token.introduction);
+      }
+
       token.metrics.price = toNumber(snapshot.price, token.metrics.price);
       token.metrics.change24hPct =
         snapshot.change_pct_24h === undefined
           ? token.metrics.change24hPct
-          : toNumber(snapshot.change_pct_24h) * 100;
+          : toPercent(snapshot.change_pct_24h);
       token.metrics.turnover24hUsd = toNumber(
         snapshot.turnover_24h,
         token.metrics.turnover24hUsd
@@ -303,14 +414,25 @@ async function enrichWithSnapshots(tokens: TokenAnalysis[]) {
       token.metrics.turnoverRate = toNumber(snapshot.turnover_rate, token.metrics.turnoverRate);
       token.metrics.marketcapUsd = toNumber(snapshot.marketcap, token.metrics.marketcapUsd);
       token.metrics.marketcapRank = normalizeRank(snapshot.marketcap_rank);
-    } catch {
-      return;
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        continue;
+      }
+
+      warnings.push(
+        `${token.symbol} snapshot enrichment failed: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`
+      );
     }
   }
+
+  return warnings;
 }
 
-async function sosoFetch<T>(path: string): Promise<T> {
+async function sosoFetch<T>(path: string, options: SosoFetchOptions = {}): Promise<T> {
   const apiKey = process.env.SOSOVALUE_API_KEY;
+  const retryRateLimit = options.retryRateLimit ?? true;
 
   if (!apiKey) {
     throw new RouteError("SOSOVALUE_API_KEY is not configured.", 500);
@@ -323,30 +445,57 @@ async function sosoFetch<T>(path: string): Promise<T> {
     return cached.data as T;
   }
 
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch(`${SOSO_BASE_URL}${path}`, {
-      headers: {
-        "x-soso-api-key": apiKey,
-      },
-      next: { revalidate: 30 },
-    });
-    const payload = (await response.json().catch(() => null)) as SosoEnvelope<T> | null;
-    const rateLimited = response.status === 429 || payload?.code === 402901;
+  const inFlight = inFlightSosoFetches.get(path);
 
-    if (rateLimited && attempt < 2) {
-      await sleep(1200 * (attempt + 1));
-      continue;
-    }
-
-    if (!response.ok || !payload || payload.code !== 0) {
-      throw new Error(payload?.message ?? `SoSoValue request failed with ${response.status}`);
-    }
-
-    responseCache.set(path, { loadedAt: Date.now(), data: payload.data });
-    return payload.data;
+  if (inFlight) {
+    return (await inFlight) as T;
   }
 
-  throw new Error("SoSoValue request failed after retry.");
+  const requestPromise = (async () => {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fetch(`${SOSO_BASE_URL}${path}`, {
+        headers: {
+          "x-soso-api-key": apiKey,
+        },
+        next: { revalidate: 30 },
+      });
+      const payload = (await response.json().catch(() => null)) as SosoEnvelope<T> | null;
+      const rateLimited = response.status === 429 || payload?.code === 402901;
+
+      if (rateLimited && cached) {
+        return cached.data as T;
+      }
+
+      if (rateLimited) {
+        if (retryRateLimit && attempt < 4) {
+          await sleep(1500 * 2 ** attempt);
+          continue;
+        }
+
+        throw new RouteError(
+          "SoSoValue rate limit exceeded. Please retry after the API window resets.",
+          429
+        );
+      }
+
+      if (!response.ok || !payload || payload.code !== 0) {
+        throw new Error(payload?.message ?? `SoSoValue request failed with ${response.status}`);
+      }
+
+      responseCache.set(path, { loadedAt: Date.now(), data: payload.data });
+      return payload.data;
+    }
+
+    throw new Error("SoSoValue request failed after retry.");
+  })();
+
+  inFlightSosoFetches.set(path, requestPromise);
+
+  try {
+    return await requestPromise;
+  } finally {
+    inFlightSosoFetches.delete(path);
+  }
 }
 
 async function composeWithOpenAI(
@@ -369,6 +518,7 @@ async function composeWithOpenAI(
         name: "SoSoValue signal composer",
         usedOpenAI: false,
         note: "Add OPENAI_API_KEY to switch this route to OpenAI.",
+        objective: MODEL_OBJECTIVE,
       },
       warnings: ["OpenAI key is not configured; using the SoSoValue signal composer."],
     };
@@ -476,7 +626,7 @@ async function composeWithOpenAI(
 
     const text = extractOpenAIText(data);
     const parsed = extractJson(text);
-    const composition = coerceAiWeights(parsed, tokens);
+    const composition = coerceAiWeights(parsed, tokens, fallback);
 
     if (!composition) {
       throw new Error("OpenAI response did not include valid weights.");
@@ -488,6 +638,7 @@ async function composeWithOpenAI(
         provider: "OpenAI",
         name: data.model ?? modelName,
         usedOpenAI: true,
+        objective: MODEL_OBJECTIVE,
       },
       warnings: [],
     };
@@ -499,6 +650,7 @@ async function composeWithOpenAI(
         name: "SoSoValue signal composer",
         usedOpenAI: false,
         note: "OpenAI call failed, so the route used the local market-signal composer.",
+        objective: MODEL_OBJECTIVE,
       },
       warnings: [
         `OpenAI composer unavailable: ${
@@ -531,15 +683,29 @@ function composeFromMarketData(theme: string, tokens: TokenAnalysis[]) {
         rankScore * 0.06) *
       volatilityPenalty;
 
-    return { token, score: Math.max(score, 0.08) };
+    return {
+      token,
+      score: Math.max(score, 0.08),
+      components: {
+        themeFit: toScore(themeScore),
+        momentum: toScore(momentumScore),
+        flowTrend: toScore(flowScore),
+        flowScale: toScore(flowScale),
+        liquidity: toScore(liquidityScore),
+        marketCapRank: toScore(rankScore),
+        volatilityPenalty: toScore(volatilityPenalty),
+        composite: toScore(Math.max(score, 0.08)),
+      },
+    };
   });
 
   const weights = roundWeights(scored.map(({ score }) => score));
 
-  return scored.map(({ token }, index) => ({
+  return scored.map(({ token, components }, index) => ({
     symbol: token.symbol,
     weight: weights[index],
     rationale: buildRationale(token),
+    score: components,
   }));
 }
 
@@ -548,12 +714,10 @@ function buildBacktest(
   composition: WeightSuggestion[],
   benchmarkHistory: HistoryPoint[]
 ) {
-  const weightBySymbol = new Map(
-    composition.map((item) => [item.symbol.toUpperCase(), item.weight / 100])
-  );
+  const weightBySymbol = new Map(composition.map((item) => [item.symbol, item.weight / 100]));
   const histories = tokens.map((token) => ({
     symbol: token.symbol,
-    history: token.history.slice(-30),
+    history: token.history,
   }));
   const minLength = Math.min(
     benchmarkHistory.length,
@@ -565,41 +729,498 @@ function buildBacktest(
     history: item.history.slice(-minLength),
   }));
   const points: BacktestPoint[] = [];
+  const targetWeights = new Map(
+    trimmed.map((item) => [item.symbol, weightBySymbol.get(item.symbol) ?? 0])
+  );
+  let activeWeights = new Map(targetWeights);
+  let indexValue = 100;
+  let rebalanceCount = 0;
+  const indexReturns: number[] = [];
 
-  for (let index = 0; index < minLength; index += 1) {
-    const value = trimmed.reduce((sum, item) => {
-      const first = item.history[0]?.close ?? 0;
-      const current = item.history[index]?.close ?? first;
-      const normalized = first > 0 ? (current / first) * 100 : 100;
+  if (!minLength) {
+    return {
+      points,
+      periodDays: 0,
+      indexReturnPct: 0,
+      btcReturnPct: 0,
+      maxDrawdownPct: 0,
+      volatilityPct: 0,
+      sharpeRatio: 0,
+      winRatePct: 0,
+      rebalanceCount: 0,
+      assumptions: backtestAssumptions(),
+      validation: buildValidationReport(tokens, composition, points),
+    };
+  }
 
-      return sum + normalized * (weightBySymbol.get(item.symbol) ?? 0);
-    }, 0);
-    const firstBenchmark = benchmark[0]?.close ?? 0;
+  const firstBenchmark = benchmark[0]?.close ?? 0;
+
+  points.push({
+    date: benchmark[0]?.date ?? "",
+    index: 100,
+    btc: 100,
+  });
+
+  for (let index = 1; index < minLength; index += 1) {
+    const tokenReturns = trimmed.map((item) => {
+      const previous = item.history[index - 1]?.close ?? 0;
+      const current = item.history[index]?.close ?? previous;
+
+      return {
+        symbol: item.symbol,
+        dailyReturn: previous > 0 ? current / previous - 1 : 0,
+      };
+    });
+    const portfolioReturn = tokenReturns.reduce(
+      (sum, item) => sum + (activeWeights.get(item.symbol) ?? 0) * item.dailyReturn,
+      0
+    );
+
+    indexValue *= 1 + portfolioReturn;
+    indexReturns.push(portfolioReturn);
+
+    const driftedWeights = new Map<string, number>();
+    const driftTotal = tokenReturns.reduce(
+      (sum, item) => sum + (activeWeights.get(item.symbol) ?? 0) * (1 + item.dailyReturn),
+      0
+    );
+
+    tokenReturns.forEach((item) => {
+      const drifted = (activeWeights.get(item.symbol) ?? 0) * (1 + item.dailyReturn);
+      driftedWeights.set(item.symbol, driftTotal > 0 ? drifted / driftTotal : 0);
+    });
+
+    activeWeights = driftedWeights;
+
+    if (index % 7 === 0 && index < minLength - 1) {
+      activeWeights = new Map(targetWeights);
+      rebalanceCount += 1;
+    }
+
     const currentBenchmark = benchmark[index]?.close ?? firstBenchmark;
 
     points.push({
       date: benchmark[index]?.date ?? "",
-      index: round(value),
+      index: round(indexValue),
       btc: firstBenchmark > 0 ? round((currentBenchmark / firstBenchmark) * 100) : 100,
     });
   }
 
+  const volatility = standardDeviation(indexReturns) * Math.sqrt(365) * 100;
+  const meanDailyReturn = average(indexReturns);
+
   return {
     points,
+    periodDays: Math.max(points.length - 1, 0),
     indexReturnPct: points.length ? round(points.at(-1)!.index - 100) : 0,
     btcReturnPct: points.length ? round(points.at(-1)!.btc - 100) : 0,
     maxDrawdownPct: round(calculateMaxDrawdown(points.map((point) => point.index))),
+    volatilityPct: round(volatility),
+    sharpeRatio: round(volatility > 0 ? (meanDailyReturn * 365 * 100) / volatility : 0),
+    winRatePct: round(
+      indexReturns.length
+        ? (indexReturns.filter((dailyReturn) => dailyReturn > 0).length /
+            indexReturns.length) *
+            100
+        : 0
+    ),
+    rebalanceCount,
+    assumptions: backtestAssumptions(),
+    validation: buildValidationReport(tokens, composition, points),
   };
 }
 
-function coerceAiWeights(parsed: ComposerPayload, tokens: TokenAnalysis[]) {
+function buildValidationReport(
+  tokens: TokenAnalysis[],
+  composition: WeightSuggestion[],
+  points: BacktestPoint[]
+): IndexForgeResponse["backtest"]["validation"] {
+  const periodDays = Math.max(points.length - 1, 0);
+  const holdoutDays = Math.min(30, periodDays);
+  const trainingDays = Math.max(periodDays - holdoutDays, 0);
+  const holdoutStart = points.at(-(holdoutDays + 1)) ?? points[0];
+  const holdoutEnd = points.at(-1);
+  const weights = composition.map((item) => item.weight / 100);
+  const effectiveNames = weights.length
+    ? 1 / weights.reduce((sum, weight) => sum + weight ** 2, 0)
+    : 0;
+  const maxWeightPct = Math.max(...composition.map((item) => item.weight), 0);
+  const liquidityPass = tokens.every(
+    (token) => token.metrics.turnover24hUsd > 0 && token.metrics.flow30dUsd > 0
+  );
+  const concentrationPass = maxWeightPct <= 40 && effectiveNames >= Math.min(3, weights.length);
+  const overfitNotes = [
+    `${trainingDays}d training / ${holdoutDays}d holdout split from the shared SoSoValue kline window.`,
+    "Theme fit is one input, but final weights are capped by liquidity, rank, and volatility controls.",
+    "Manual slider edits reuse the same validation and backtest path as AI weights.",
+  ];
+
+  if (!concentrationPass) {
+    overfitNotes.push("Concentration warning: reduce the largest weight or add more constituents.");
+  }
+
+  if (!liquidityPass) {
+    overfitNotes.push("Liquidity warning: one or more constituents lack live turnover or flow data.");
+  }
+
+  return {
+    trainingDays,
+    holdoutDays,
+    holdoutIndexReturnPct:
+      holdoutStart && holdoutEnd && holdoutStart.index > 0
+        ? round((holdoutEnd.index / holdoutStart.index - 1) * 100)
+        : 0,
+    holdoutBtcReturnPct:
+      holdoutStart && holdoutEnd && holdoutStart.btc > 0
+        ? round((holdoutEnd.btc / holdoutStart.btc - 1) * 100)
+        : 0,
+    effectiveNames: round(effectiveNames),
+    maxWeightPct,
+    concentrationPass,
+    liquidityPass,
+    overfitNotes,
+  };
+}
+
+async function getSsiReferences(
+  composition: WeightSuggestion[],
+  maxReferences: number
+): Promise<{
+  references: SsiReference[];
+  warnings: string[];
+}> {
+  const warnings: string[] = [];
+  let tickers: string[] = [];
+
+  if (maxReferences <= 0) {
+    return {
+      references: [],
+      warnings: [
+        "SSI references skipped for this larger basket to stay within SoSoValue rate limits.",
+      ],
+    };
+  }
+
+  try {
+    tickers = normalizeIndexTickers(await sosoFetch<string[]>("/indices"));
+  } catch (error) {
+    warnings.push(
+      `SoSoValue Index list unavailable: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`
+    );
+  }
+
+  const candidates = prioritizeIndexTickers(
+    tickers.length ? tickers : ["ssimag7", "ssidefi", "ssimeme", "ussi"]
+  ).slice(0, Math.min(maxReferences, 2));
+  const customWeights = new Map(
+    composition.map((item) => [normalizeSymbol(item.symbol), item.weight / 100])
+  );
+  const references: SsiReference[] = [];
+
+  for (const ticker of candidates) {
+    try {
+      await sleep(100);
+      const constituents = await sosoFetch<IndexConstituent[]>(
+        `/indices/${ticker}/constituents`,
+        { retryRateLimit: false }
+      );
+      const matchedSymbols = constituents
+        .map((item) => normalizeSymbol(item.symbol ?? ""))
+        .filter((symbol) => customWeights.has(symbol));
+      const overlap = constituents.reduce((sum, item) => {
+        const symbol = normalizeSymbol(item.symbol ?? "");
+        const customWeight = customWeights.get(symbol) ?? 0;
+        const ssiWeight = toNumber(item.weight);
+
+        return sum + Math.min(customWeight, ssiWeight);
+      }, 0);
+
+      references.push({
+        ticker,
+        label: formatSsiLabel(ticker),
+        overlapPct: round(overlap * 100),
+        constituentCount: constituents.length,
+        matchedSymbols,
+        price: null,
+        return1mPct: null,
+        return3mPct: null,
+        return1yPct: null,
+        ytdPct: null,
+      });
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        continue;
+      }
+
+      warnings.push(
+        `${formatSsiLabel(ticker)} constituents unavailable: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`
+      );
+    }
+  }
+
+  const topReferences = references
+    .sort((a, b) => b.overlapPct - a.overlapPct || a.ticker.localeCompare(b.ticker))
+    .slice(0, maxReferences);
+
+  for (const reference of topReferences) {
+    try {
+      await sleep(100);
+      const snapshot = await sosoFetch<IndexSnapshot>(
+        `/indices/${reference.ticker}/market-snapshot`,
+        { retryRateLimit: false }
+      );
+
+      reference.price = toNullableNumber(snapshot.price);
+      reference.return1mPct = toNullablePercent(snapshot["1month_roi"]);
+      reference.return3mPct = toNullablePercent(snapshot["3month_roi"]);
+      reference.return1yPct = toNullablePercent(snapshot["1year_roi"]);
+      reference.ytdPct = toNullablePercent(snapshot.ytd);
+    } catch (error) {
+      if (isRateLimitError(error)) {
+        continue;
+      }
+
+      warnings.push(
+        `${reference.label} market snapshot unavailable: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`
+      );
+    }
+  }
+
+  return { references: topReferences, warnings };
+}
+
+function buildSsiManifest(
+  indexName: string,
+  ticker: string,
+  composition: WeightSuggestion[],
+  dataWindowDays: number
+): IndexForgeResponse["ssiDraft"]["manifest"] {
+  const constituents = composition.map((item) => ({
+    symbol: item.symbol,
+    weightPct: item.weight,
+  }));
+  const id = `${ticker.toLowerCase()}-${hashString(
+    JSON.stringify({ indexName, ticker, constituents })
+  )}`;
+
+  return {
+    id,
+    methodology:
+      "Theme-fit scoring with SoSoValue momentum, 30d activity, liquidity, market-cap rank, and volatility controls; weekly target rebalance.",
+    dataWindowDays,
+    constituents,
+  };
+}
+
+async function buildSodexIntent(composition: WeightSuggestion[]): Promise<{
+  intent: IndexForgeResponse["sodexIntent"];
+  warnings: string[];
+}> {
+  const spotEndpoint =
+    process.env.SODEX_SPOT_ENDPOINT ?? "https://testnet-gw.sodex.dev/api/v1/spot";
+  const hasSigningConfig = Boolean(
+    process.env.SODEX_ACCOUNT_ID &&
+      process.env.SODEX_API_KEY_NAME &&
+      process.env.SODEX_API_PRIVATE_KEY
+  );
+  const warnings: string[] = [];
+  let markets: SodexSymbol[] = [];
+
+  try {
+    markets = await fetchSodexSymbols(spotEndpoint);
+  } catch (error) {
+    warnings.push(
+      `SoDEX testnet symbols unavailable: ${
+        error instanceof Error ? error.message : "unknown error"
+      }`
+    );
+  }
+
+  const orders = composition.map((item) => {
+    const market = findSodexMarket(item.symbol, markets);
+
+    return {
+      symbol: item.symbol,
+      market: market?.name ?? null,
+      displayName: market?.displayName ?? null,
+      marketStatus: market?.status ?? "NOT_LISTED",
+      minNotional: market?.minNotional ?? null,
+      executable: Boolean(market?.name && market.status === "TRADING"),
+      side: "buy" as const,
+      type: "market" as const,
+      timeInForce: "IOC" as const,
+      targetWeightPct: item.weight,
+      quoteAllocationPct: item.weight,
+    };
+  });
+  const executableCount = orders.filter((order) => order.executable).length;
+
+  return {
+    intent: {
+      mode: "Spot batch rebalance",
+      network: spotEndpoint.includes("mainnet") ? "mainnet" : "testnet",
+      marketDataEndpoint: `${spotEndpoint}/markets/symbols`,
+      orderEndpoint: `${spotEndpoint}/trade/orders/batch`,
+      status: hasSigningConfig
+        ? `${executableCount}/${orders.length} legs resolved; ready for signed SoDEX order construction.`
+        : `${executableCount}/${orders.length} legs resolved; configure SoDEX accountID, API key name, and EIP-712 signer before submission.`,
+      requiresSignature: true,
+      requiredHeaders: ["Content-Type", "Accept", "X-API-Key", "X-API-Sign", "X-API-Nonce"],
+      orders,
+      notes: [
+        "Use the live SoDEX symbol name field in signed order payloads.",
+        "Submit as a signed batch order only after accountID, precision, min notional, and slippage checks pass.",
+        "Keep the private signing key server-side; send only X-API-Sign and nonce headers.",
+      ],
+    },
+    warnings,
+  };
+}
+
+async function fetchSodexSymbols(spotEndpoint: string) {
+  const response = await fetch(`${spotEndpoint}/markets/symbols`, {
+    headers: {
+      accept: "application/json",
+    },
+    next: { revalidate: 30 },
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | { data?: SodexSymbol[] }
+    | SodexSymbol[]
+    | null;
+
+  if (!response.ok || !payload) {
+    throw new Error(`SoDEX symbols failed with ${response.status}`);
+  }
+
+  return Array.isArray(payload) ? payload : payload.data ?? [];
+}
+
+function findSodexMarket(symbol: string, markets: SodexSymbol[]) {
+  const normalized = normalizeSymbol(symbol);
+
+  return (
+    markets.find((market) => {
+      const base = normalizeSymbol(market.baseCoin ?? "");
+      const name = normalizeSymbol(market.name ?? "");
+      const displayName = normalizeSymbol(market.displayName ?? "");
+
+      return (
+        base === normalized ||
+        base === `V${normalized}` ||
+        base === `TEST${normalized}` ||
+        name.startsWith(`${normalized}_`) ||
+        name.startsWith(`V${normalized}_`) ||
+        name.startsWith(`TEST${normalized}_`) ||
+        displayName.startsWith(`${normalized}/`) ||
+        displayName.startsWith(`V${normalized}/`) ||
+        displayName.startsWith(`TEST${normalized}/`)
+      );
+    }) ?? null
+  );
+}
+
+function coerceManualWeights(
+  weights: ManualWeight[] | undefined,
+  tokens: TokenAnalysis[],
+  fallback: WeightSuggestion[]
+) {
+  if (!weights?.length) return null;
+
+  const fallbackBySymbol = new Map(fallback.map((item) => [item.symbol, item]));
+  const rawBySymbol = new Map<string, number>();
+
+  weights.forEach((item) => {
+    const symbol = normalizeSymbol(item.symbol ?? "");
+    const weight = toNumber(item.weight);
+
+    if (symbol && weight > 0) {
+      rawBySymbol.set(symbol, weight);
+    }
+  });
+
+  if (!tokens.every((token) => rawBySymbol.has(token.symbol))) return null;
+
+  const normalized = roundWeights(tokens.map((token) => rawBySymbol.get(token.symbol) ?? 0));
+
+  return tokens.map((token, index) => ({
+    symbol: token.symbol,
+    weight: normalized[index],
+    rationale: buildManualRationale(token, normalized[index]),
+    score: fallbackBySymbol.get(token.symbol)?.score,
+  }));
+}
+
+function coerceTokenInput(value: unknown): string[] {
+  if (value === undefined || value === null || value === "") return DEFAULT_TOKENS;
+
+  if (typeof value === "string") {
+    return value.split(/[\s,]+/);
+  }
+
+  if (!Array.isArray(value)) {
+    throw new RouteError("Tokens must be an array of symbol strings.", 400);
+  }
+
+  if (!value.every((item) => typeof item === "string")) {
+    throw new RouteError("Every token symbol must be a string.", 400);
+  }
+
+  return value;
+}
+
+function coerceManualWeightInput(value: unknown): ManualWeight[] | undefined {
+  if (value === undefined || value === null) return undefined;
+
+  if (!Array.isArray(value)) {
+    throw new RouteError("Weights must be an array of { symbol, weight } objects.", 400);
+  }
+
+  return value.map((item) => {
+    if (!isRecord(item)) {
+      throw new RouteError("Weights must be an array of { symbol, weight } objects.", 400);
+    }
+
+    if (item.symbol !== undefined && typeof item.symbol !== "string") {
+      throw new RouteError("Weight symbols must be strings.", 400);
+    }
+
+    if (item.weight !== undefined && typeof item.weight !== "number") {
+      throw new RouteError("Weight values must be numbers.", 400);
+    }
+
+    return {
+      symbol: item.symbol,
+      weight: item.weight,
+    };
+  });
+}
+
+function buildManualRationale(token: TokenAnalysis, weight: number) {
+  return `Manual ${weight}% target using ${formatSigned(
+    token.metrics.return30dPct
+  )} 30d return, ${formatSigned(token.metrics.flowTrendPct)} flow trend, and live SoSoValue liquidity.`;
+}
+
+function coerceAiWeights(
+  parsed: ComposerPayload,
+  tokens: TokenAnalysis[],
+  fallback: WeightSuggestion[]
+) {
   if (!Array.isArray(parsed.weights)) return null;
 
   const tokenSymbols = new Set(tokens.map((token) => token.symbol));
+  const fallbackBySymbol = new Map(fallback.map((item) => [item.symbol, item]));
   const bySymbol = new Map<string, WeightSuggestion>();
 
   parsed.weights.forEach((item) => {
-    const symbol = item.symbol?.toUpperCase();
+    const symbol = normalizeSymbol(item.symbol ?? "");
     const weight = toNumber(item.weight);
 
     if (symbol && tokenSymbols.has(symbol) && weight > 0) {
@@ -607,6 +1228,7 @@ function coerceAiWeights(parsed: ComposerPayload, tokens: TokenAnalysis[]) {
         symbol,
         weight,
         rationale: item.rationale ?? item.reason ?? "Weighted by OpenAI from live SoSoValue inputs.",
+        score: fallbackBySymbol.get(symbol)?.score,
       });
     }
   });
@@ -621,6 +1243,7 @@ function coerceAiWeights(parsed: ComposerPayload, tokens: TokenAnalysis[]) {
     symbol: token.symbol,
     weight: normalizedWeights[index],
     rationale: bySymbol.get(token.symbol)?.rationale ?? "",
+    score: fallbackBySymbol.get(token.symbol)?.score,
   }));
 }
 
@@ -719,6 +1342,15 @@ function normalizeLog(value: number, values: number[]) {
   return clamp((Math.log10(Math.max(value, 1)) - min) / (max - min), 0.08, 1);
 }
 
+function backtestAssumptions() {
+  return [
+    "Daily SoSoValue closes over the latest shared history window.",
+    "Weekly target-weight rebalance every 7 daily bars.",
+    "No trading fees, slippage, taxes, custody costs, or borrow costs.",
+    "BTC is normalized to the same first close as the index.",
+  ];
+}
+
 function calculateMaxDrawdown(values: number[]) {
   let peak = values[0] ?? 100;
   let drawdown = 0;
@@ -749,6 +1381,8 @@ function average(values: number[]) {
 
 function cacheTtl(path: string) {
   if (path === "/currencies") return 5 * 60 * 1000;
+  if (path === "/indices") return 60 * 1000;
+  if (path.includes("/constituents")) return 60 * 1000;
   if (path.includes("/market-snapshot")) return 30 * 1000;
   if (path.includes("/klines")) return 60 * 1000;
   return 5 * 60 * 1000;
@@ -761,6 +1395,36 @@ function sleep(ms: number) {
 function normalizeRank(rank: MarketSnapshot["marketcap_rank"]) {
   const value = toNumber(rank);
   return value > 0 ? Math.round(value) : null;
+}
+
+function normalizeIndexTickers(value: unknown) {
+  return Array.isArray(value)
+    ? Array.from(
+        new Set(
+          value
+            .map((ticker) => (typeof ticker === "string" ? ticker.trim().toLowerCase() : ""))
+            .filter(Boolean)
+        )
+      )
+    : [];
+}
+
+function prioritizeIndexTickers(tickers: string[]) {
+  const preferredOrder = ["ssiai", "ssidepin", "ssidefi", "ssimag7", "ussi", "ssimeme"];
+  const priority = new Map(preferredOrder.map((ticker, index) => [ticker, index]));
+
+  return [...tickers].sort((a, b) => {
+    const aPriority = priority.get(a) ?? Number.MAX_SAFE_INTEGER;
+    const bPriority = priority.get(b) ?? Number.MAX_SAFE_INTEGER;
+
+    return aPriority - bPriority || a.localeCompare(b);
+  });
+}
+
+function formatSsiLabel(ticker: string) {
+  if (ticker.toLowerCase() === "ussi") return "USSI";
+
+  return `${ticker.replace(/^ssi/i, "").toUpperCase()}.ssi`;
 }
 
 function stripHtml(value: string) {
@@ -784,6 +1448,21 @@ function toNumber(value: unknown, fallback = 0) {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function toNullableNumber(value: unknown) {
+  const parsed = toNumber(value, Number.NaN);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function toPercent(value: unknown, fallback = 0) {
+  const parsed = toNumber(value, fallback);
+  return Math.abs(parsed) <= 1 ? parsed * 100 : parsed;
+}
+
+function toNullablePercent(value: unknown) {
+  const parsed = toNullableNumber(value);
+  return parsed === null ? null : round(Math.abs(parsed) <= 1 ? parsed * 100 : parsed);
+}
+
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
@@ -792,7 +1471,87 @@ function round(value: number) {
   return Math.round(value * 100) / 100;
 }
 
+function toScore(value: number) {
+  return round(value * 100);
+}
+
 function formatSigned(value: number) {
   const sign = value > 0 ? "+" : "";
   return `${sign}${round(value)}%`;
+}
+
+function isRateLimitError(error: unknown) {
+  return error instanceof RouteError && error.status === 429;
+}
+
+function buildCompositionCacheKey(
+  theme: string,
+  symbols: string[],
+  weights: ManualWeight[] | undefined
+) {
+  return JSON.stringify({
+    theme,
+    symbols,
+    weights:
+      weights
+        ?.map((item) => ({
+          symbol: normalizeSymbol(item.symbol ?? ""),
+          weight: toNumber(item.weight),
+        }))
+        .sort((a, b) => a.symbol.localeCompare(b.symbol)) ?? null,
+  });
+}
+
+function setCompositionCache(key: string, data: IndexForgeResponse) {
+  compositionCache.set(key, { loadedAt: Date.now(), data });
+
+  if (compositionCache.size > 40) {
+    const oldest = Array.from(compositionCache.entries()).sort(
+      (a, b) => a[1].loadedAt - b[1].loadedAt
+    )[0]?.[0];
+
+    if (oldest) {
+      compositionCache.delete(oldest);
+    }
+  }
+}
+
+function assertRequestAllowed(request: Request) {
+  const forwardedFor = request.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const key = forwardedFor || "local";
+  const now = Date.now();
+  const current = requestWindows.get(key);
+
+  if (!current || now >= current.resetAt) {
+    requestWindows.set(key, { resetAt: now + COMPOSER_RATE_WINDOW_MS, count: 1 });
+    return;
+  }
+
+  current.count += 1;
+
+  if (current.count > COMPOSER_RATE_LIMIT) {
+    throw new RouteError("Too many composer requests. Please retry in a minute.", 429);
+  }
+}
+
+function errorResponse(error: unknown) {
+  const status = error instanceof RouteError ? error.status : 500;
+  const message = error instanceof Error ? error.message : "IndexForge failed to compose.";
+
+  return NextResponse.json({ message }, { status });
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function hashString(value: string) {
+  let hash = 0;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash = (hash << 5) - hash + value.charCodeAt(index);
+    hash |= 0;
+  }
+
+  return Math.abs(hash).toString(36).padStart(6, "0").slice(0, 6);
 }

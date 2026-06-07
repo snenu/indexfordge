@@ -14,7 +14,7 @@ export const metadata: Metadata = {
     template: "%s | IndexForge",
   },
   description:
-    "Design, backtest, and publish on-chain thematic crypto indexes with SoSoValue, AI, SSI Protocol, and SoDEX.",
+    "Design, validate, publish draft thematic crypto indexes with SoSoValue, SoSoValue Indexes, transparent weighting, creator profiles, and SoDEX testnet simulation.",
   applicationName: "IndexForge",
   generator: "IndexForge",
   keywords: [
@@ -29,7 +29,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "IndexForge",
     description:
-      "Forge thematic crypto indexes from live SoSoValue data and OpenAI weighting.",
+      "Forge thematic crypto indexes from live SoSoValue data, SSI references, transparent weighting, creator profiles, and SoDEX testnet simulation.",
     type: "website",
     siteName: "IndexForge",
   },

@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { Database, Loader2, Plus, UserRound } from "lucide-react";
 import type { PublishedIndexDraft, SsiGalleryItem } from "@/lib/index-forge";
-import { formatPct } from "@/lib/index-forge";
+import { formatPct, sanitizePublishedDrafts } from "@/lib/index-forge";
 import { Pill } from "./pill";
 import { Button } from "./ui/button";
 
@@ -193,7 +193,7 @@ function readPublishedDrafts(): PublishedIndexDraft[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem("indexforge:published-drafts") ?? "[]");
 
-    return Array.isArray(parsed) ? parsed : [];
+    return sanitizePublishedDrafts(parsed);
   } catch {
     return [];
   }

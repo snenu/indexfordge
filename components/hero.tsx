@@ -19,7 +19,7 @@ export function Hero() {
           <i className="font-light">on-chain</i> index
         </h1>
         <p className="font-mono text-sm sm:text-base text-foreground/60 text-balance mt-8 max-w-[440px] mx-auto">
-          Design, backtest, and prepare thematic crypto indexes with live SoSoValue data, transparent weighting, SSI references, and SoDEX execution intents.
+          Design, backtest, and prepare thematic crypto indexes with live SoSoValue data, macro risk, transparent weighting, SSI references, and SoDEX execution intents.
         </p>
 
         <div className="mt-14 flex flex-wrap justify-center gap-3">

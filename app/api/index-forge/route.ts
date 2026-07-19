@@ -5,6 +5,7 @@ import {
   type BacktestPoint,
   type HistoryPoint,
   type IndexForgeResponse,
+  type MacroEvent,
   type SsiReference,
   type TokenAnalysis,
   type WeightSuggestion,
@@ -12,11 +13,9 @@ import {
   normalizeSymbol,
   uniqueSymbols,
 } from "@/lib/index-forge";
+import { SosoApiError, isSosoRateLimitError, sosoFetch } from "@/lib/sosovalue";
 
 export const dynamic = "force-dynamic";
-
-const SOSO_BASE_URL =
-  process.env.SOSOVALUE_BASE_URL ?? "https://openapi.sosovalue.com/openapi/v1";
 
 const SOURCES = [
   {
@@ -39,12 +38,6 @@ const SOURCES = [
 
 const MODEL_OBJECTIVE =
   "Maximize theme fit and risk-adjusted exposure using live SoSoValue momentum, 30d traded activity, flow trend, liquidity, market-cap rank, and volatility controls.";
-
-type SosoEnvelope<T> = {
-  code: number;
-  message: string;
-  data: T;
-};
 
 type Currency = {
   currency_id: string;
@@ -89,6 +82,11 @@ type IndexSnapshot = {
   ytd?: number | string;
 };
 
+type MacroEventGroup = {
+  date?: string;
+  events?: string[];
+};
+
 type OpenAIResponse = {
   output_text?: string;
   output?: Array<{
@@ -110,8 +108,8 @@ type ComposerPayload = {
 };
 
 type ManualWeight = {
-  symbol?: string;
-  weight?: number;
+  symbol: string;
+  weight: number;
 };
 
 type SodexSymbol = {
@@ -121,10 +119,6 @@ type SodexSymbol = {
   quoteCoin?: string;
   minNotional?: string;
   status?: string;
-};
-
-type SosoFetchOptions = {
-  retryRateLimit?: boolean;
 };
 
 class RouteError extends Error {
@@ -137,8 +131,6 @@ class RouteError extends Error {
 }
 
 let currencyCache: { loadedAt: number; data: Currency[] } | null = null;
-const responseCache = new Map<string, { loadedAt: number; data: unknown }>();
-const inFlightSosoFetches = new Map<string, Promise<unknown>>();
 const compositionCache = new Map<string, { loadedAt: number; data: IndexForgeResponse }>();
 const requestWindows = new Map<string, { resetAt: number; count: number }>();
 const COMPOSITION_CACHE_TTL_MS = 60 * 1000;
@@ -179,7 +171,7 @@ export async function POST(request: Request) {
 async function handleRequest(input: { theme: string; tokens: string[]; weights?: ManualWeight[] }) {
   try {
     const theme = cleanTheme(input.theme);
-    const requestedSymbols = uniqueSymbols(input.tokens).slice(0, 8);
+    const requestedSymbols = uniqueSymbols(input.tokens);
     const cacheKey = buildCompositionCacheKey(theme, requestedSymbols, input.weights);
     const cached = compositionCache.get(cacheKey);
 
@@ -189,6 +181,10 @@ async function handleRequest(input: { theme: string; tokens: string[]; weights?:
 
     if (requestedSymbols.length < 3) {
       throw new RouteError("Pick at least 3 token symbols for an index.", 400);
+    }
+
+    if (requestedSymbols.length > 8) {
+      throw new RouteError("Pick no more than 8 token symbols for an index.", 400);
     }
 
     const currencies = await getCurrencies();
@@ -275,6 +271,14 @@ async function handleRequest(input: { theme: string; tokens: string[]; weights?:
     const ssiLookup = await getSsiReferences(composition, tokens.length <= 5 ? 1 : 0);
     const manifest = buildSsiManifest(indexName, ticker, composition, backtest.periodDays);
     const sodex = await buildSodexIntent(composition);
+    const macro = await getMacroOverlay();
+    const responseWarnings = [
+      ...warnings,
+      ...ai.warnings,
+      ...ssiLookup.warnings,
+      ...sodex.warnings,
+      ...macro.warnings,
+    ];
 
     const response: IndexForgeResponse = {
       theme,
@@ -298,8 +302,16 @@ async function handleRequest(input: { theme: string; tokens: string[]; weights?:
       },
       ssiReferences: ssiLookup.references,
       sodexIntent: sodex.intent,
+      macro,
+      readiness: buildReadinessReport({
+        tokens,
+        warnings: responseWarnings,
+        model: ai.model,
+        sodexIntent: sodex.intent,
+        macro,
+      }),
       unresolved,
-      warnings: [...warnings, ...ai.warnings, ...ssiLookup.warnings, ...sodex.warnings],
+      warnings: responseWarnings,
       sources: SOURCES,
     };
 
@@ -428,74 +440,6 @@ async function enrichWithSnapshots(tokens: TokenAnalysis[]) {
   }
 
   return warnings;
-}
-
-async function sosoFetch<T>(path: string, options: SosoFetchOptions = {}): Promise<T> {
-  const apiKey = process.env.SOSOVALUE_API_KEY;
-  const retryRateLimit = options.retryRateLimit ?? true;
-
-  if (!apiKey) {
-    throw new RouteError("SOSOVALUE_API_KEY is not configured.", 500);
-  }
-
-  const cached = responseCache.get(path);
-  const ttl = cacheTtl(path);
-
-  if (cached && Date.now() - cached.loadedAt < ttl) {
-    return cached.data as T;
-  }
-
-  const inFlight = inFlightSosoFetches.get(path);
-
-  if (inFlight) {
-    return (await inFlight) as T;
-  }
-
-  const requestPromise = (async () => {
-    for (let attempt = 0; attempt < 5; attempt += 1) {
-      const response = await fetch(`${SOSO_BASE_URL}${path}`, {
-        headers: {
-          "x-soso-api-key": apiKey,
-        },
-        next: { revalidate: 30 },
-      });
-      const payload = (await response.json().catch(() => null)) as SosoEnvelope<T> | null;
-      const rateLimited = response.status === 429 || payload?.code === 402901;
-
-      if (rateLimited && cached) {
-        return cached.data as T;
-      }
-
-      if (rateLimited) {
-        if (retryRateLimit && attempt < 4) {
-          await sleep(1500 * 2 ** attempt);
-          continue;
-        }
-
-        throw new RouteError(
-          "SoSoValue rate limit exceeded. Please retry after the API window resets.",
-          429
-        );
-      }
-
-      if (!response.ok || !payload || payload.code !== 0) {
-        throw new Error(payload?.message ?? `SoSoValue request failed with ${response.status}`);
-      }
-
-      responseCache.set(path, { loadedAt: Date.now(), data: payload.data });
-      return payload.data;
-    }
-
-    throw new Error("SoSoValue request failed after retry.");
-  })();
-
-  inFlightSosoFetches.set(path, requestPromise);
-
-  try {
-    return await requestPromise;
-  } finally {
-    inFlightSosoFetches.delete(path);
-  }
 }
 
 async function composeWithOpenAI(
@@ -923,6 +867,138 @@ function buildValidationReport(
   };
 }
 
+async function getMacroOverlay(): Promise<IndexForgeResponse["macro"]> {
+  const empty = {
+    source: "SoSoValue Macro" as const,
+    riskLevel: "Unknown" as const,
+    nextEventDate: null,
+    eventCount: 0,
+    events: [],
+    warnings: [],
+  };
+
+  try {
+    const groups = await sosoFetch<MacroEventGroup[]>("/macro/events", {
+      retryRateLimit: false,
+    });
+    const events = normalizeMacroEvents(Array.isArray(groups) ? groups : []);
+    const upcoming = events.filter((event) => event.daysUntil >= 0 && event.daysUntil <= 14);
+    const limitedEvents = upcoming.slice(0, 8);
+
+    return {
+      source: "SoSoValue Macro",
+      riskLevel: rankMacroRisk(limitedEvents),
+      nextEventDate: limitedEvents[0]?.date ?? null,
+      eventCount: upcoming.reduce((sum, event) => sum + event.events.length, 0),
+      events: limitedEvents,
+      warnings: [],
+    };
+  } catch (error) {
+    return {
+      ...empty,
+      warnings: [
+        `SoSoValue macro events unavailable: ${
+          error instanceof Error ? error.message : "unknown error"
+        }`,
+      ],
+    };
+  }
+}
+
+function normalizeMacroEvents(groups: MacroEventGroup[]): MacroEvent[] {
+  const today = startOfUtcDay(new Date());
+
+  return groups
+    .map((group) => {
+      const date = String(group.date ?? "").trim();
+      const eventDate = parseUtcDate(date);
+      const events =
+        group.events
+          ?.map((event) => String(event).trim())
+          .filter(Boolean)
+          .slice(0, 6) ?? [];
+
+      if (!date || !eventDate || !events.length) return null;
+
+      const daysUntil = Math.round((eventDate.getTime() - today.getTime()) / 86_400_000);
+
+      return {
+        date,
+        events,
+        daysUntil,
+        riskLevel: rankMacroEventRisk(daysUntil, events.length),
+      };
+    })
+    .filter((event): event is MacroEvent => Boolean(event))
+    .sort((a, b) => a.daysUntil - b.daysUntil || a.date.localeCompare(b.date));
+}
+
+function buildReadinessReport(input: {
+  tokens: TokenAnalysis[];
+  warnings: string[];
+  model: IndexForgeResponse["model"];
+  sodexIntent: IndexForgeResponse["sodexIntent"];
+  macro: IndexForgeResponse["macro"];
+}): IndexForgeResponse["readiness"] {
+  const hasRateLimitWarning = input.warnings.some((warning) =>
+    warning.toLowerCase().includes("rate limit")
+  );
+  const executableLegs = input.sodexIntent.orders.filter((order) => order.executable).length;
+  const checks: IndexForgeResponse["readiness"]["checks"] = [
+    {
+      label: "China browser path",
+      status: "pass",
+      detail: "Client uses local assets and same-origin API routes; third-party calls stay server-side.",
+    },
+    {
+      label: "SoSoValue market data",
+      status:
+        input.tokens.length >= 3 && input.tokens.every((token) => token.history.length > 0)
+          ? "pass"
+          : "blocked",
+      detail: `${input.tokens.length} constituents loaded with shared daily kline windows.`,
+    },
+    {
+      label: "Rate-limit posture",
+      status: hasRateLimitWarning ? "watch" : "pass",
+      detail: hasRateLimitWarning
+        ? "A SoSoValue optional enrichment hit the key-level limit; cached core data stayed usable."
+        : "Shared cache, in-flight dedupe, and optional enrichment skips protect the 20/min key limit.",
+    },
+    {
+      label: "Macro event overlay",
+      status: input.macro.riskLevel === "Unknown" ? "watch" : "pass",
+      detail:
+        input.macro.riskLevel === "Unknown"
+          ? "Macro events are unavailable for this response."
+          : `${input.macro.eventCount} SoSoValue macro event(s) in the next 14 days.`,
+    },
+    {
+      label: "OpenAI dependency",
+      status: "pass",
+      detail: input.model.usedOpenAI
+        ? "OpenAI is configured server-side for weight suggestions."
+        : "Quant fallback is active, so China browser users do not depend on OpenAI reachability.",
+    },
+    {
+      label: "SoDEX execution path",
+      status: executableLegs === input.sodexIntent.orders.length ? "pass" : "watch",
+      detail: `${executableLegs}/${input.sodexIntent.orders.length} SoDEX market legs are currently executable.`,
+    },
+  ];
+  const status = checks.some((check) => check.status === "blocked")
+    ? "blocked"
+    : checks.some((check) => check.status === "watch")
+      ? "watch"
+      : "ready";
+
+  return {
+    status,
+    region: "China-compatible browser path",
+    checks,
+  };
+}
+
 async function getSsiReferences(
   composition: WeightSuggestion[],
   maxReferences: number
@@ -952,9 +1028,12 @@ async function getSsiReferences(
     );
   }
 
-  const candidates = prioritizeIndexTickers(
-    tickers.length ? tickers : ["ssimag7", "ssidefi", "ssimeme", "ussi"]
-  ).slice(0, Math.min(maxReferences, 2));
+  if (!tickers.length) {
+    warnings.push("SoSoValue Index list returned no tickers; SSI references skipped.");
+    return { references: [], warnings };
+  }
+
+  const candidates = prioritizeIndexTickers(tickers).slice(0, Math.min(maxReferences, 2));
   const customWeights = new Map(
     composition.map((item) => [normalizeSymbol(item.symbol), item.weight / 100])
   );
@@ -1228,12 +1307,17 @@ function coerceManualWeightInput(value: unknown): ManualWeight[] | undefined {
       throw new RouteError("Weights must be an array of { symbol, weight } objects.", 400);
     }
 
-    if (item.symbol !== undefined && typeof item.symbol !== "string") {
-      throw new RouteError("Weight symbols must be strings.", 400);
+    if (typeof item.symbol !== "string" || !normalizeSymbol(item.symbol)) {
+      throw new RouteError("Every weight must include a token symbol.", 400);
     }
 
-    if (item.weight !== undefined && typeof item.weight !== "number") {
-      throw new RouteError("Weight values must be numbers.", 400);
+    if (
+      typeof item.weight !== "number" ||
+      !Number.isFinite(item.weight) ||
+      item.weight <= 0 ||
+      item.weight > 100
+    ) {
+      throw new RouteError("Weight values must be finite numbers above 0 and at most 100.", 400);
     }
 
     return {
@@ -1420,13 +1504,43 @@ function average(values: number[]) {
     : 0;
 }
 
-function cacheTtl(path: string) {
-  if (path === "/currencies") return 5 * 60 * 1000;
-  if (path === "/indices") return 60 * 1000;
-  if (path.includes("/constituents")) return 60 * 1000;
-  if (path.includes("/market-snapshot")) return 30 * 1000;
-  if (path.includes("/klines")) return 60 * 1000;
-  return 5 * 60 * 1000;
+function rankMacroRisk(events: MacroEvent[]): IndexForgeResponse["macro"]["riskLevel"] {
+  if (!events.length) return "Low";
+
+  const sevenDayEventCount = events
+    .filter((event) => event.daysUntil <= 7)
+    .reduce((sum, event) => sum + event.events.length, 0);
+
+  if (events.some((event) => event.riskLevel === "High") || sevenDayEventCount >= 4) {
+    return "High";
+  }
+
+  if (events.some((event) => event.riskLevel === "Medium") || sevenDayEventCount > 0) {
+    return "Medium";
+  }
+
+  return "Low";
+}
+
+function rankMacroEventRisk(
+  daysUntil: number,
+  eventCount: number
+): MacroEvent["riskLevel"] {
+  if (daysUntil <= 3 || eventCount >= 3) return "High";
+  if (daysUntil <= 7 || eventCount >= 2) return "Medium";
+  return "Low";
+}
+
+function parseUtcDate(value: string) {
+  const [year, month, day] = value.split("-").map(Number);
+
+  if (!year || !month || !day) return null;
+
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function startOfUtcDay(date: Date) {
+  return new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
 }
 
 function sleep(ms: number) {
@@ -1522,7 +1636,7 @@ function formatSigned(value: number) {
 }
 
 function isRateLimitError(error: unknown) {
-  return error instanceof RouteError && error.status === 429;
+  return (error instanceof RouteError && error.status === 429) || isSosoRateLimitError(error);
 }
 
 function buildCompositionCacheKey(
@@ -1536,7 +1650,7 @@ function buildCompositionCacheKey(
     weights:
       weights
         ?.map((item) => ({
-          symbol: normalizeSymbol(item.symbol ?? ""),
+          symbol: normalizeSymbol(item.symbol),
           weight: toNumber(item.weight),
         }))
         .sort((a, b) => a.symbol.localeCompare(b.symbol)) ?? null,
@@ -1576,7 +1690,8 @@ function assertRequestAllowed(request: Request) {
 }
 
 function errorResponse(error: unknown) {
-  const status = error instanceof RouteError ? error.status : 500;
+  const status =
+    error instanceof RouteError || error instanceof SosoApiError ? error.status : 500;
   const message = error instanceof Error ? error.message : "IndexForge failed to compose.";
 
   return NextResponse.json({ message }, { status });

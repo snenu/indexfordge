@@ -1,5 +1,5 @@
 import Link from "next/link";
-import { ArrowUpRight, Database, LineChart, SlidersHorizontal } from "lucide-react";
+import { ArrowUpRight, CalendarDays, Database, LineChart, SlidersHorizontal } from "lucide-react";
 import type { ReactNode } from "react";
 import { Pill } from "./pill";
 
@@ -8,7 +8,7 @@ export function HomeProof() {
     <main className="relative z-10 border-y border-border/70 bg-background/95 py-14 backdrop-blur-[2px] sm:py-16">
       <div className="container grid gap-8 lg:grid-cols-[0.82fr_1.18fr] lg:gap-16">
         <div>
-          <Pill className="mb-5">WAVE 2 PRODUCT</Pill>
+          <Pill className="mb-5">WAVE 3 PRODUCT</Pill>
           <h2 className="font-sentient text-4xl leading-tight sm:text-5xl">
             Build, validate, publish <i>drafts</i>
           </h2>
@@ -25,6 +25,12 @@ export function HomeProof() {
             label="Validation"
             href="/designer"
             value="Risk metrics, holdout checks, rebalance count, assumptions, and overfit controls."
+          />
+          <HomeRow
+            icon={<CalendarDays />}
+            label="Macro"
+            href="/designer"
+            value="SoSoValue macro events are pulled into the composer as a live production risk overlay."
           />
           <HomeRow
             icon={<Database />}

@@ -116,6 +116,21 @@ export type SodexIntent = {
   notes: string[];
 };
 
+export type MacroRiskLevel = "Low" | "Medium" | "High" | "Unknown";
+
+export type MacroEvent = {
+  date: string;
+  events: string[];
+  daysUntil: number;
+  riskLevel: Exclude<MacroRiskLevel, "Unknown">;
+};
+
+export type ProductionReadinessCheck = {
+  label: string;
+  status: "pass" | "watch" | "blocked";
+  detail: string;
+};
+
 export type ValidationReport = {
   trainingDays: number;
   holdoutDays: number;
@@ -174,6 +189,19 @@ export type IndexForgeResponse = {
   };
   ssiReferences: SsiReference[];
   sodexIntent: SodexIntent;
+  macro: {
+    source: "SoSoValue Macro";
+    riskLevel: MacroRiskLevel;
+    nextEventDate: string | null;
+    eventCount: number;
+    events: MacroEvent[];
+    warnings: string[];
+  };
+  readiness: {
+    status: "ready" | "watch" | "blocked";
+    region: "China-compatible browser path";
+    checks: ProductionReadinessCheck[];
+  };
   unresolved: string[];
   warnings: string[];
   sources: {
@@ -238,4 +266,67 @@ export function formatPct(value: number) {
   if (!Number.isFinite(value)) return "0.00%";
   const sign = value > 0 ? "+" : "";
   return `${sign}${value.toFixed(2)}%`;
+}
+
+export function sanitizePublishedDrafts(value: unknown): PublishedIndexDraft[] {
+  if (!Array.isArray(value)) return [];
+
+  return value
+    .map((item) => {
+      if (!isRecord(item)) return null;
+
+      const constituents = Array.isArray(item.constituents)
+        ? item.constituents
+            .map((constituent) => {
+              if (!isRecord(constituent)) return null;
+
+              const symbol = normalizeSymbol(constituent.symbol);
+              const weightPct = toFiniteNumber(constituent.weightPct);
+
+              return symbol && weightPct > 0 ? { symbol, weightPct } : null;
+            })
+            .filter((constituent): constituent is { symbol: string; weightPct: number } =>
+              Boolean(constituent)
+            )
+        : [];
+
+      const id = toCleanString(item.id);
+      const creator = toCleanString(item.creator);
+      const indexName = toCleanString(item.indexName);
+      const ticker = normalizeSymbol(item.ticker);
+      const theme = toCleanString(item.theme);
+      const updatedAt = toCleanString(item.updatedAt);
+      const manifestId = toCleanString(item.manifestId);
+
+      if (!id || !creator || !indexName || !ticker || !theme || !updatedAt || !manifestId) {
+        return null;
+      }
+
+      return {
+        id,
+        creator,
+        indexName,
+        ticker,
+        theme,
+        updatedAt,
+        returnPct: toFiniteNumber(item.returnPct),
+        maxDrawdownPct: toFiniteNumber(item.maxDrawdownPct),
+        constituents,
+        manifestId,
+      };
+    })
+    .filter((draft): draft is PublishedIndexDraft => Boolean(draft));
+}
+
+function toCleanString(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function toFiniteNumber(value: unknown) {
+  const parsed = typeof value === "number" ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }

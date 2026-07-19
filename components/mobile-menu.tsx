@@ -42,7 +42,7 @@ export const MobileMenu = ({ className }: MobileMenuProps) => {
       <Dialog.Portal>
         <div
           data-overlay="true"
-          className="fixed z-30 inset-0 bg-black/50 backdrop-blur-sm"
+          className="fixed inset-0 z-[70] bg-black/50 backdrop-blur-sm"
         />
 
         <Dialog.Content
@@ -54,7 +54,7 @@ export const MobileMenu = ({ className }: MobileMenuProps) => {
               e.preventDefault();
             }
           }}
-          className="fixed top-0 left-0 w-full z-40 py-28 md:py-40"
+          className="fixed left-0 top-0 z-[80] w-full py-28 md:py-40"
         >
           <Dialog.Title className="sr-only">Menu</Dialog.Title>
 

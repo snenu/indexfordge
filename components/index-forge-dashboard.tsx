@@ -3,12 +3,15 @@
 import {
   Activity,
   ArrowUpRight,
+  CalendarDays,
   Database,
   Gem,
+  Globe2,
   LineChart,
   Loader2,
   RefreshCw,
   Save,
+  ShieldCheck,
   SlidersHorizontal,
   Sparkles,
   WandSparkles,
@@ -25,6 +28,7 @@ import {
   type TokenUniverseItem,
   formatPct,
   formatUsd,
+  sanitizePublishedDrafts,
   uniqueSymbols,
 } from "@/lib/index-forge";
 import { cn } from "@/lib/utils";
@@ -53,7 +57,7 @@ async function requestComposition(
 }
 
 async function requestUniverse() {
-const response = await fetch("/api/index-forge/universe");
+  const response = await fetch("/api/index-forge/universe");
 
   if (!response.ok) return [];
 
@@ -267,7 +271,7 @@ export function IndexForgeDashboard() {
                 <input
                   value={theme}
                   onChange={(event) => setTheme(event.target.value)}
-                  className="mt-3 w-full bg-transparent font-sentient text-3xl text-foreground outline-none placeholder:text-foreground/25 sm:text-4xl"
+                  className="mt-3 w-full bg-transparent font-sentient text-3xl text-foreground placeholder:text-foreground/25 sm:text-4xl"
                   placeholder="AI infrastructure"
                 />
               </label>
@@ -281,7 +285,7 @@ export function IndexForgeDashboard() {
                   onChange={(event) =>
                     setTokens(uniqueSymbols(event.target.value.split(/[\s,]+/)).slice(0, 8))
                   }
-                  className="mt-3 w-full bg-transparent font-mono text-lg uppercase text-foreground outline-none placeholder:text-foreground/25"
+                  className="mt-3 w-full bg-transparent font-mono text-lg uppercase text-foreground placeholder:text-foreground/25"
                   placeholder="TAO, RENDER, FET, AKT, NMR"
                 />
               </label>
@@ -293,7 +297,7 @@ export function IndexForgeDashboard() {
                 <input
                   value={tokenSearch}
                   onChange={(event) => setTokenSearch(event.target.value)}
-                  className="mt-3 w-full bg-transparent font-mono text-sm uppercase text-foreground outline-none placeholder:text-foreground/25"
+                  className="mt-3 w-full bg-transparent font-mono text-sm uppercase text-foreground placeholder:text-foreground/25"
                   placeholder="Search SoSoValue universe"
                 />
               </label>
@@ -372,7 +376,7 @@ export function IndexForgeDashboard() {
               <input
                 value={creator}
                 onChange={(event) => setCreator(event.target.value)}
-                className="mt-3 w-full bg-transparent font-mono text-sm text-foreground outline-none placeholder:text-foreground/25"
+                className="mt-3 w-full bg-transparent font-mono text-sm text-foreground placeholder:text-foreground/25"
                 placeholder="Creator name"
               />
             </label>
@@ -437,7 +441,9 @@ export function IndexForgeDashboard() {
             <Composition result={result} loading={loading} />
             <Transparency result={result} loading={loading} />
             <Performance result={result} loading={loading} />
+            <MacroRisk result={result} loading={loading} />
             <Execution result={result} loading={loading} />
+            <Readiness result={result} loading={loading} />
           </div>
         </div>
       </section>
@@ -471,9 +477,27 @@ export function IndexForgeDashboard() {
               value={result?.ssiDraft.status ?? "Unsigned SSI manifest"}
             />
             <LayerRow
+              icon={<CalendarDays />}
+              label="Macro"
+              value={
+                result
+                  ? `${result.macro.riskLevel} risk, ${result.macro.eventCount} events in 14d`
+                  : "SoSoValue macro events overlay"
+              }
+            />
+            <LayerRow
               icon={<ArrowUpRight />}
-                label="SoDEX"
-                value={result?.sodexIntent.status ?? "Testnet rebalance intent"}
+              label="SoDEX"
+              value={result?.sodexIntent.status ?? "Testnet rebalance intent"}
+            />
+            <LayerRow
+              icon={<Globe2 />}
+              label="China path"
+              value={
+                result
+                  ? `${result.readiness.status.toUpperCase()} / ${result.readiness.region}`
+                  : "Same-origin API and local asset delivery"
+              }
             />
           </div>
         </div>
@@ -839,6 +863,71 @@ function PerformanceChart({ points }: { points: BacktestPoint[] }) {
   );
 }
 
+function MacroRisk({
+  result,
+  loading,
+}: {
+  result: IndexForgeResponse | null;
+  loading: boolean;
+}) {
+  if (!result && loading) {
+    return <div className="h-56 animate-pulse border-y border-border/70 bg-white/[0.03]" />;
+  }
+
+  if (!result) return null;
+
+  return (
+    <div className="border-y border-border/70 py-5">
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+            <CalendarDays className="size-4" />
+            Macro calendar
+          </div>
+          <h3 className="mt-1 font-sentient text-3xl">SoSoValue event risk</h3>
+        </div>
+        <div className={cn("font-mono text-xs uppercase", macroTone(result.macro.riskLevel))}>
+          {result.macro.riskLevel}
+        </div>
+      </div>
+
+      <div className="grid gap-0 border-t border-border/60">
+        {result.macro.events.length ? (
+          result.macro.events.map((event) => (
+            <div
+              key={event.date}
+              className="grid gap-3 border-b border-border/50 py-4 last:border-b-0 sm:grid-cols-[120px_1fr_90px]"
+            >
+              <div className="font-mono text-xs uppercase text-primary">{event.date}</div>
+              <div>
+                <div className="font-mono text-xs uppercase text-foreground/65">
+                  {daysUntilLabel(event.daysUntil)}
+                </div>
+                <p className="mt-1 text-sm leading-6 text-foreground/55">
+                  {event.events.join(", ")}
+                </p>
+              </div>
+              <div className={cn("font-mono text-xs uppercase", macroTone(event.riskLevel))}>
+                {event.riskLevel}
+              </div>
+            </div>
+          ))
+        ) : (
+          <div className="py-5 font-mono text-xs uppercase text-foreground/45">
+            No upcoming SoSoValue macro events returned for the next 14 days.
+          </div>
+        )}
+      </div>
+
+      {result.macro.warnings.length ? (
+        <div className="mt-4 border-l border-primary pl-4 font-mono text-xs uppercase leading-5 text-primary/80">
+          {result.macro.warnings.join(" ")}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Execution({
   result,
   loading,
@@ -948,6 +1037,57 @@ function Execution({
   );
 }
 
+function Readiness({
+  result,
+  loading,
+}: {
+  result: IndexForgeResponse | null;
+  loading: boolean;
+}) {
+  if (!result && loading) {
+    return <div className="h-56 animate-pulse border-y border-border/70 bg-white/[0.03]" />;
+  }
+
+  if (!result) return null;
+
+  return (
+    <div className="border-y border-border/70 py-5">
+      <div className="mb-5 flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 font-mono text-xs uppercase tracking-[0.18em] text-foreground/45">
+            <ShieldCheck className="size-4" />
+            Production checks
+          </div>
+          <h3 className="mt-1 font-sentient text-3xl">China-safe readiness</h3>
+        </div>
+        <div
+          className={cn(
+            "font-mono text-xs uppercase",
+            readinessTone(result.readiness.status)
+          )}
+        >
+          {result.readiness.status}
+        </div>
+      </div>
+
+      <div className="grid gap-0 border-t border-border/60">
+        {result.readiness.checks.map((check) => (
+          <div
+            key={check.label}
+            className="grid gap-3 border-b border-border/50 py-4 last:border-b-0 sm:grid-cols-[150px_88px_1fr]"
+          >
+            <div className="font-mono text-xs uppercase text-primary">{check.label}</div>
+            <div className={cn("font-mono text-xs uppercase", checkTone(check.status))}>
+              {check.status}
+            </div>
+            <div className="text-sm leading-6 text-foreground/55">{check.detail}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LayerRow({
   icon,
   label,
@@ -1017,6 +1157,33 @@ function formatPlainPct(value: number) {
   return `${value.toFixed(2)}%`;
 }
 
+function macroTone(level: IndexForgeResponse["macro"]["riskLevel"]) {
+  if (level === "High") return "text-primary";
+  if (level === "Medium") return "text-foreground";
+  if (level === "Low") return "text-foreground/55";
+  return "text-foreground/35";
+}
+
+function readinessTone(status: IndexForgeResponse["readiness"]["status"]) {
+  if (status === "ready") return "text-primary";
+  if (status === "watch") return "text-foreground";
+  return "text-primary";
+}
+
+function checkTone(status: IndexForgeResponse["readiness"]["checks"][number]["status"]) {
+  if (status === "pass") return "text-primary";
+  if (status === "watch") return "text-foreground";
+  return "text-primary";
+}
+
+function daysUntilLabel(daysUntil: number) {
+  if (daysUntil === 0) return "Today";
+  if (daysUntil === 1) return "Tomorrow";
+  if (daysUntil > 1) return `${daysUntil}d ahead`;
+  if (daysUntil === -1) return "Yesterday";
+  return `${Math.abs(daysUntil)}d ago`;
+}
+
 function weightsFromComposition(result: IndexForgeResponse) {
   return Object.fromEntries(result.composition.map((item) => [item.symbol, item.weight]));
 }
@@ -1035,7 +1202,7 @@ function readPublishedDrafts(): PublishedIndexDraft[] {
   try {
     const parsed = JSON.parse(window.localStorage.getItem("indexforge:published-drafts") ?? "[]");
 
-    return Array.isArray(parsed) ? parsed : [];
+    return sanitizePublishedDrafts(parsed);
   } catch {
     return [];
   }
